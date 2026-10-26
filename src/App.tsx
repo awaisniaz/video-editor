@@ -1,8 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Image as ImageIcon, Music, Play, Pause, Download, Sparkles,
-  Film, Clock, CheckCircle, AlertCircle, Loader, Mic, Zap, Brain,
-  Trash2, Wand2
+  Film, Clock, CheckCircle, AlertCircle, Loader, Zap, Brain,
+  Target, SkipForward
 } from 'lucide-react';
 
 interface ImageItem {
@@ -10,26 +10,32 @@ interface ImageItem {
   file: File;
   url: string;
   name: string;
-  duration: number;
-  startTime: number;
-  effect: EffectType;
+  keywords: string[];
   img: HTMLImageElement;
   loaded: boolean;
-  keywords: string[];
-  matchedAt: number | null;
+}
+
+interface SyncedImage {
+  image: ImageItem;
+  startTime: number;
+  duration: number;
+  matchedKeyword: string;
+  effect: EffectType;
 }
 
 type EffectType = 'kenburns' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right' | 'fade';
 
 const EFFECTS: EffectType[] = ['kenburns', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'fade'];
 
-type ProcessingStage = 'idle' | 'uploading' | 'transcribing' | 'analyzing' | 'syncing' | 'ready';
+type Stage = 'idle' | 'uploading' | 'processing' | 'ready';
 
 export default function App() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [audioUrl, setAudioUrl] = useState<string>('');
   const [audioDuration, setAudioDuration] = useState<number>(0);
   const [images, setImages] = useState<ImageItem[]>([]);
+  const [syncedImages, setSyncedImages] = useState<SyncedImage[]>([]);
+  const [skippedImages, setSkippedImages] = useState<ImageItem[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
@@ -37,10 +43,10 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState<string>('');
   const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
   const [statusMsg, setStatusMsg] = useState('');
-  const [transcript, setTranscript] = useState<string>('');
-  const [stage, setStage] = useState<ProcessingStage>('idle');
+  const [stage, setStage] = useState<Stage>('idle');
   const [stageProgress, setStageProgress] = useState(0);
   const [stageMessage, setStageMessage] = useState('');
+  const [transcript, setTranscript] = useState<string>('');
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -56,6 +62,8 @@ export default function App() {
       setVideoUrl('');
       setAudioDuration(0);
       setTranscript('');
+      setSyncedImages([]);
+      setSkippedImages([]);
       setStage('uploading');
       setStageMessage('Audio uploaded ✓');
       processingRef.current = false;
@@ -73,14 +81,13 @@ export default function App() {
     });
   };
 
-  // Extract keywords from filename
   const extractKeywords = (filename: string): string[] => {
     return filename
-      .replace(/\.[^/.]+$/, '') // remove extension
-      .replace(/[-_]/g, ' ') // replace separators
-      .replace(/\d+/g, '') // remove numbers
+      .replace(/\.[^/.]+$/, '')
+      .replace(/[-_]/g, ' ')
+      .replace(/\d+/g, '')
       .split(/\s+/)
-      .filter(w => w.length > 2) // filter short words
+      .filter(w => w.length > 2)
       .map(w => w.toLowerCase());
   };
 
@@ -99,13 +106,9 @@ export default function App() {
         file,
         url,
         name: file.name,
-        duration: 0,
-        startTime: 0,
-        effect: EFFECTS[Math.floor(Math.random() * EFFECTS.length)],
+        keywords,
         img,
         loaded: true,
-        keywords,
-        matchedAt: null,
       });
     }
 
@@ -114,7 +117,6 @@ export default function App() {
     setStageMessage(`${newImages.length} images uploaded ✓`);
   };
 
-  // Auto-detect duration
   useEffect(() => {
     if (!audioUrl) return;
     const timer = setTimeout(() => {
@@ -139,11 +141,9 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [audioUrl]);
 
-  // Auto-process when both audio and images are ready
   useEffect(() => {
     if (audioFile && images.length > 0 && audioDuration > 0 && stage === 'uploading' && !processingRef.current) {
       processingRef.current = true;
-      // Start auto-processing after a short delay
       const timer = setTimeout(() => {
         processAutomatically();
       }, 1000);
@@ -151,7 +151,6 @@ export default function App() {
     }
   }, [audioFile, images.length, audioDuration, stage]);
 
-  // Similarity calculation
   const calculateSimilarity = (a: string, b: string): number => {
     if (a === b) return 1;
     if (a.includes(b) || b.includes(a)) return 0.8;
@@ -182,7 +181,6 @@ export default function App() {
     return matrix[b.length][a.length];
   };
 
-  // Transcribe audio
   const transcribeAudio = async (): Promise<string> => {
     return new Promise((resolve) => {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -234,81 +232,80 @@ export default function App() {
     });
   };
 
-  // Auto-sync images to transcript
-  const syncImagesToTranscript = (transcriptText: string) => {
+  const syncImagesToNarration = (transcriptText: string) => {
     if (images.length === 0 || !audioDuration) return;
 
     const transcriptLower = transcriptText.toLowerCase();
     const words = transcriptLower.split(/\s+/).filter(w => w.length > 0);
+    
+    const matched: SyncedImage[] = [];
+    const skipped: ImageItem[] = [];
 
-    const updatedImages = images.map(img => {
+    // Find matching images
+    for (const img of images) {
       let bestMatchTime: number | null = null;
       let bestScore = 0;
+      let matchedKeyword = '';
 
       for (const keyword of img.keywords) {
         for (let i = 0; i < words.length; i++) {
           const score = calculateSimilarity(words[i], keyword);
-          if (score > 0.5 && score > bestScore) {
+          if (score > 0.6 && score > bestScore) {
             bestScore = score;
             const timeRatio = i / words.length;
             bestMatchTime = timeRatio * audioDuration;
+            matchedKeyword = keyword;
           }
         }
       }
 
-      return { ...img, matchedAt: bestMatchTime };
-    });
+      if (bestMatchTime !== null) {
+        matched.push({
+          image: img,
+          startTime: bestMatchTime,
+          duration: 0,
+          matchedKeyword,
+          effect: EFFECTS[Math.floor(Math.random() * EFFECTS.length)],
+        });
+      } else {
+        skipped.push(img);
+      }
+    }
 
-    // Sort by matched time and assign durations
-    const sorted = [...updatedImages].sort((a, b) => (a.matchedAt ?? audioDuration) - (b.matchedAt ?? audioDuration));
-    
-    const finalImages = sorted.map((img, idx) => {
-      const start = img.matchedAt ?? (idx * audioDuration / sorted.length);
-      const nextStart = idx < sorted.length - 1 
-        ? (sorted[idx + 1].matchedAt ?? ((idx + 1) * audioDuration / sorted.length))
-        : audioDuration;
+    // Sort by time
+    matched.sort((a, b) => a.startTime - b.startTime);
+
+    // Calculate durations
+    const finalSynced = matched.map((item, idx) => {
+      const nextStart = idx < matched.length - 1 ? matched[idx + 1].startTime : audioDuration;
       return {
-        ...img,
-        startTime: start,
-        duration: Math.max(0.5, nextStart - start),
+        ...item,
+        duration: Math.max(0.5, nextStart - item.startTime),
       };
     });
 
-    setImages(finalImages);
+    setSyncedImages(finalSynced);
+    setSkippedImages(skipped);
   };
 
-  // Main auto-processing function
   const processAutomatically = async () => {
-    setStage('transcribing');
+    setStage('processing');
     setStageProgress(0);
     setStageMessage('Narration analyze ho rahi hai...');
 
-    // Step 1: Transcribe
     const transcriptText = await transcribeAudio();
     setTranscript(transcriptText);
     setStageProgress(100);
 
-    // Step 2: Analyze & Sync
-    setStage('syncing');
-    setStageProgress(0);
     setStageMessage('Images ko narration ke saath sync kar rahe hain...');
 
     if (transcriptText && images.length > 0) {
-      syncImagesToTranscript(transcriptText);
-    } else {
-      // Fallback: equal distribution
-      const dur = audioDuration / images.length;
-      setImages(prev => prev.map((img, idx) => ({
-        ...img,
-        startTime: idx * dur,
-        duration: dur,
-        matchedAt: null,
-      })));
+      syncImagesToNarration(transcriptText);
     }
 
     await new Promise(r => setTimeout(r, 500));
     setStage('ready');
-    setStageMessage('✓ Video ready hai! Preview ya Export karein');
+    setStageMessage(`✓ ${syncedImages.length} images synced! ${skippedImages.length} skipped`);
   };
 
   const drawFrame = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, progress: number, effect: EffectType, width: number, height: number) => {
@@ -382,19 +379,19 @@ export default function App() {
     ctx.fillRect(0, 0, width, height);
   };
 
-  const getCurrentImageAtTime = (time: number): { img: ImageItem; progress: number } | null => {
-    if (images.length === 0) return null;
-    for (const imgItem of images) {
-      if (time >= imgItem.startTime && time < imgItem.startTime + imgItem.duration) {
-        const progress = (time - imgItem.startTime) / imgItem.duration;
-        return { img: imgItem, progress: Math.min(Math.max(progress, 0), 1) };
+  const getCurrentImageAtTime = (time: number): { img: SyncedImage; progress: number } | null => {
+    if (syncedImages.length === 0) return null;
+    for (const item of syncedImages) {
+      if (time >= item.startTime && time < item.startTime + item.duration) {
+        const progress = (time - item.startTime) / item.duration;
+        return { img: item, progress: Math.min(Math.max(progress, 0), 1) };
       }
     }
-    if (images.length > 0 && time < images[0].startTime) {
-      return { img: images[0], progress: 0 };
+    if (syncedImages.length > 0 && time < syncedImages[0].startTime) {
+      return { img: syncedImages[0], progress: 0 };
     }
-    if (images.length > 0) {
-      const last = images[images.length - 1];
+    if (syncedImages.length > 0) {
+      const last = syncedImages[syncedImages.length - 1];
       return { img: last, progress: 1 };
     }
     return null;
@@ -409,18 +406,18 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const result = getCurrentImageAtTime(time);
-    if (result && result.img.loaded) {
-      drawFrame(ctx, result.img.img, result.progress, result.img.effect, width, height);
+    if (result && result.img.image.loaded) {
+      drawFrame(ctx, result.img.image.img, result.progress, result.img.effect, width, height);
     } else {
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, width, height);
     }
-  }, [images, resolution]);
+  }, [syncedImages, resolution]);
 
   const startPreview = () => {
     const audio = audioRef.current;
-    if (!audio || !audioFile || images.length === 0 || !audioDuration) {
-      setStatusMsg('Pehle audio aur images upload karein!');
+    if (!audio || !audioFile || syncedImages.length === 0 || !audioDuration) {
+      setStatusMsg('Sync complete hone dein!');
       return;
     }
 
@@ -461,8 +458,8 @@ export default function App() {
   };
 
   const exportVideo = async () => {
-    if (!audioFile || images.length === 0 || !audioDuration) {
-      setStatusMsg('Pehle sab kuch upload karein!');
+    if (!audioFile || syncedImages.length === 0 || !audioDuration) {
+      setStatusMsg('Pehle sync complete karein!');
       return;
     }
 
@@ -562,16 +559,15 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (images.length > 0 && !isPlaying && stage === 'ready') {
+    if (syncedImages.length > 0 && !isPlaying && stage === 'ready') {
       renderCurrentFrame(0);
     }
-  }, [images.length, isPlaying, renderCurrentFrame, stage]);
+  }, [syncedImages.length, isPlaying, renderCurrentFrame, stage]);
 
-  const readyForVideo = audioFile && images.length > 0 && audioDuration > 0 && stage === 'ready';
+  const readyForVideo = audioFile && syncedImages.length > 0 && audioDuration > 0 && stage === 'ready';
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-950/30 to-gray-900 text-white">
-      {/* Hidden audio */}
       {audioUrl && (
         <audio
           ref={audioRef}
@@ -591,7 +587,6 @@ export default function App() {
         />
       )}
 
-      {/* Header */}
       <header className="border-b border-white/10 backdrop-blur-xl bg-black/30 sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -602,7 +597,7 @@ export default function App() {
               <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
                 VideoForge AI
               </h1>
-              <p className="text-xs text-gray-500">Bas audio + images do, video bana lenge</p>
+              <p className="text-xs text-gray-500">100% Narration-Synced Videos</p>
             </div>
           </div>
           {audioDuration > 0 && (
@@ -625,9 +620,7 @@ export default function App() {
       )}
 
       <main className="max-w-6xl mx-auto px-4 py-8 space-y-8">
-        {/* Upload Section */}
         <div className="grid md:grid-cols-2 gap-6">
-          {/* Audio */}
           <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
             <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
               <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center">
@@ -653,7 +646,6 @@ export default function App() {
             </label>
           </div>
 
-          {/* Images */}
           <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
             <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
               <div className="w-8 h-8 rounded-lg bg-pink-500/20 flex items-center justify-center">
@@ -682,8 +674,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Processing Status */}
-        {stage !== 'idle' && stage !== 'ready' && (
+        {stage === 'processing' && (
           <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 rounded-2xl p-6 border border-purple-500/30">
             <div className="flex items-center gap-4">
               <Loader className="w-8 h-8 animate-spin text-purple-400" />
@@ -700,10 +691,50 @@ export default function App() {
           </div>
         )}
 
-        {/* Ready - Show Preview & Export */}
         {stage === 'ready' && (
           <>
-            {/* Preview */}
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="bg-green-500/10 rounded-xl p-4 border border-green-500/30">
+                <div className="flex items-center gap-2 mb-2">
+                  <Target className="w-5 h-5 text-green-400" />
+                  <h3 className="font-semibold text-green-300">Synced ({syncedImages.length})</h3>
+                </div>
+                <p className="text-xs text-gray-400">Narration ke saath perfectly sync hain</p>
+              </div>
+              {skippedImages.length > 0 && (
+                <div className="bg-orange-500/10 rounded-xl p-4 border border-orange-500/30">
+                  <div className="flex items-center gap-2 mb-2">
+                    <SkipForward className="w-5 h-5 text-orange-400" />
+                    <h3 className="font-semibold text-orange-300">Skipped ({skippedImages.length})</h3>
+                  </div>
+                  <p className="text-xs text-gray-400">Narration se match nahi hui</p>
+                </div>
+              )}
+            </div>
+
+            {syncedImages.length > 0 && (
+              <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
+                <h3 className="font-semibold mb-4 flex items-center gap-2">
+                  <Zap className="w-5 h-5 text-yellow-400" />
+                  Synced Timeline
+                </h3>
+                <div className="space-y-2">
+                  {syncedImages.map((item, idx) => (
+                    <div key={item.image.id} className="flex items-center gap-3 bg-gray-800/40 rounded-lg p-3 border border-white/5">
+                      <img src={item.image.url} alt="" className="w-16 h-10 object-cover rounded" />
+                      <div className="flex-1">
+                        <p className="text-sm text-gray-300">{item.image.name}</p>
+                        <p className="text-xs text-gray-500">
+                          "{item.matchedKeyword}" • {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)}
+                        </p>
+                      </div>
+                      <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Play className="w-5 h-5 text-purple-400" />
@@ -747,38 +778,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Timeline */}
-            <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
-              <h3 className="font-semibold mb-4 flex items-center gap-2">
-                <Zap className="w-5 h-5 text-yellow-400" />
-                Synced Timeline
-              </h3>
-              <div className="relative h-24 bg-gray-800/50 rounded-lg overflow-hidden border border-white/5">
-                {images.map((img, idx) => {
-                  const left = (img.startTime / audioDuration) * 100;
-                  const width = (img.duration / audioDuration) * 100;
-                  return (
-                    <div
-                      key={img.id}
-                      className="absolute top-1 bottom-1 rounded-md overflow-hidden border border-white/20"
-                      style={{ left: `${left}%`, width: `${Math.max(width, 1)}%` }}
-                    >
-                      <img src={img.url} alt="" className="w-full h-full object-cover" />
-                      <div className="absolute inset-0 bg-purple-500/20 flex items-center justify-center">
-                        <span className="text-[10px] font-bold bg-black/70 px-1 rounded">#{idx+1}</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="flex justify-between mt-2 text-xs text-gray-500">
-                <span>0:00</span>
-                <span>{images.length} images synced</span>
-                <span>{formatTime(audioDuration)}</span>
-              </div>
-            </div>
-
-            {/* Export */}
             <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Download className="w-5 h-5 text-pink-400" />
@@ -821,7 +820,7 @@ export default function App() {
                     className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all shadow-lg shadow-purple-500/20"
                   >
                     <Film className="w-5 h-5" />
-                    Generate Video
+                    Generate Synced Video
                   </button>
                 </div>
               )}
@@ -829,26 +828,26 @@ export default function App() {
           </>
         )}
 
-        {/* Empty state */}
         {stage === 'idle' && (
           <div className="bg-white/5 rounded-2xl p-12 border border-white/10 text-center">
             <Brain className="w-16 h-16 mx-auto mb-4 text-purple-400/50" />
-            <h3 className="text-xl font-bold mb-2">Simple 3 Steps</h3>
-            <div className="grid sm:grid-cols-3 gap-4 mt-6 max-w-2xl mx-auto">
+            <h3 className="text-xl font-bold mb-2">100% Narration-Synced</h3>
+            <p className="text-gray-400 mb-6">Bas audio + images do, AI automatically relevant images ko narration ke saath sync karega</p>
+            <div className="grid sm:grid-cols-3 gap-4 max-w-2xl mx-auto">
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 font-bold mb-2">1</div>
-                <p className="text-sm font-medium">Audio Upload</p>
-                <p className="text-xs text-gray-500 mt-1">Voiceover file</p>
+                <p className="text-sm font-medium">Upload</p>
+                <p className="text-xs text-gray-500 mt-1">Audio + Images</p>
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-pink-500/20 flex items-center justify-center text-pink-400 font-bold mb-2">2</div>
-                <p className="text-sm font-medium">Images Upload</p>
-                <p className="text-xs text-gray-500 mt-1">Scene images</p>
+                <p className="text-sm font-medium">AI Sync</p>
+                <p className="text-xs text-gray-500 mt-1">Auto-match</p>
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
-                <div className="w-8 h-8 mx-auto rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-400 font-bold mb-2">3</div>
-                <p className="text-sm font-medium">Done!</p>
-                <p className="text-xs text-gray-500 mt-1">AI auto-sync</p>
+                <div className="w-8 h-8 mx-auto rounded-full bg-green-500/20 flex items-center justify-center text-green-400 font-bold mb-2">3</div>
+                <p className="text-sm font-medium">Export</p>
+                <p className="text-xs text-gray-500 mt-1">Perfect video</p>
               </div>
             </div>
           </div>
@@ -856,7 +855,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-white/10 mt-16 py-6">
-        <p className="text-center text-gray-600 text-sm">VideoForge AI — Bas do cheezein do, video bana lenge</p>
+        <p className="text-center text-gray-600 text-sm">VideoForge AI — 100% Narration-Synced Videos</p>
       </footer>
     </div>
   );
