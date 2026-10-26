@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Image as ImageIcon, Music, Play, Pause, Download, Sparkles,
   Film, Clock, CheckCircle, AlertCircle, Loader, Zap, Brain,
-  Target, SkipForward, FileText
+  Target, SkipForward, FileText, Mic
 } from 'lucide-react';
 
 interface ImageItem {
@@ -28,7 +28,7 @@ type EffectType = 'kenburns' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right'
 
 const EFFECTS: EffectType[] = ['kenburns', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'fade'];
 
-type Stage = 'idle' | 'uploading' | 'prompts' | 'processing' | 'ready';
+type Stage = 'idle' | 'uploading' | 'prompts' | 'transcript' | 'processing' | 'ready';
 
 export default function App() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
@@ -36,6 +36,7 @@ export default function App() {
   const [audioDuration, setAudioDuration] = useState<number>(0);
   const [images, setImages] = useState<ImageItem[]>([]);
   const [promptsText, setPromptsText] = useState<string>('');
+  const [transcriptText, setTranscriptText] = useState<string>('');
   const [syncedImages, setSyncedImages] = useState<SyncedImage[]>([]);
   const [skippedImages, setSkippedImages] = useState<ImageItem[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -48,12 +49,10 @@ export default function App() {
   const [stage, setStage] = useState<Stage>('idle');
   const [stageProgress, setStageProgress] = useState(0);
   const [stageMessage, setStageMessage] = useState('');
-  const [transcript, setTranscript] = useState<string>('');
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const animFrameRef = useRef<number>(0);
-  const processingRef = useRef(false);
 
   const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -63,12 +62,11 @@ export default function App() {
       setAudioUrl(url);
       setVideoUrl('');
       setAudioDuration(0);
-      setTranscript('');
+      setTranscriptText('');
       setSyncedImages([]);
       setSkippedImages([]);
       setStage('uploading');
       setStageMessage('Audio uploaded ✓');
-      processingRef.current = false;
     }
   };
 
@@ -108,14 +106,12 @@ export default function App() {
     setStageMessage(`${newImages.length} images uploaded - ab prompts paste karein`);
   };
 
-  // Parse prompts and assign to images
   const parseAndAssignPrompts = () => {
     if (!promptsText.trim()) {
       setStatusMsg('Pehle prompts paste karein!');
       return;
     }
 
-    // Split by empty lines or double newlines
     const prompts = promptsText
       .split(/\n\s*\n/)
       .map(p => p.trim())
@@ -126,13 +122,13 @@ export default function App() {
       return;
     }
 
-    // Assign prompts to images (in order)
     setImages(prev => prev.map((img, idx) => ({
       ...img,
       prompt: prompts[idx] || ''
     })));
 
-    setStatusMsg(`✓ ${Math.min(prompts.length, images.length)} prompts assign ho gaye!`);
+    setStage('transcript');
+    setStatusMsg(`✓ ${Math.min(prompts.length, images.length)} prompts assign ho gaye! Ab transcript paste karein`);
   };
 
   useEffect(() => {
@@ -148,7 +144,7 @@ export default function App() {
             setTimeout(() => {
               if (audioRef.current) {
                 const d = audioRef.current.duration;
-                if (d && isFinite(d)) setAudioDuration(d);
+                if (d && isFinite(d)) setAudioDuration(dur);
                 audioRef.current.currentTime = 0;
               }
             }, 100);
@@ -189,59 +185,8 @@ export default function App() {
     return matrix[b.length][a.length];
   };
 
-  const transcribeAudio = async (): Promise<string> => {
-    return new Promise((resolve) => {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      
-      if (!SpeechRecognition) {
-        resolve('');
-        return;
-      }
-
-      const recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = false;
-      recognition.lang = 'en-US';
-
-      let fullTranscript = '';
-      const audio = new Audio(audioUrl);
-      let startTime = 0;
-
-      audio.onloadedmetadata = () => {
-        const duration = audio.duration;
-        startTime = Date.now();
-
-        recognition.onresult = (event: any) => {
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            if (event.results[i].isFinal) {
-              fullTranscript += event.results[i][0].transcript + ' ';
-              const elapsed = (Date.now() - startTime) / 1000;
-              setStageProgress(Math.min((elapsed / duration) * 100, 95));
-            }
-          }
-        };
-
-        recognition.onend = () => resolve(fullTranscript.trim());
-        recognition.onerror = () => resolve(fullTranscript.trim());
-
-        recognition.start();
-        audio.play();
-
-        audio.onended = () => {
-          setTimeout(() => { try { recognition.stop(); } catch(e) {} }, 1000);
-        };
-
-        setTimeout(() => {
-          try { recognition.stop(); } catch(e) {}
-          audio.pause();
-          resolve(fullTranscript.trim());
-        }, (duration + 5) * 1000);
-      };
-    });
-  };
-
-  const syncImagesToNarration = (transcriptText: string) => {
-    if (images.length === 0 || !audioDuration) return;
+  const syncImagesToNarration = () => {
+    if (images.length === 0 || !audioDuration || !transcriptText.trim()) return;
 
     const transcriptLower = transcriptText.toLowerCase();
     const words = transcriptLower.split(/\s+/).filter(w => w.length > 0);
@@ -249,15 +194,13 @@ export default function App() {
     const matched: SyncedImage[] = [];
     const skipped: ImageItem[] = [];
 
-    // Analyze each image prompt against narration
     for (const img of images) {
       if (!img.prompt.trim()) {
         skipped.push(img);
         continue;
       }
 
-      // Extract keywords from prompt (remove common words)
-      const stopWords = ['a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'from', 'and', 'or', 'but', 'if', 'then', 'so', 'as', 'by', 'about', 'like', 'through', 'after', 'over', 'between', 'out', 'against', 'during', 'without', 'before', 'under', 'around', 'among'];
+      const stopWords = ['a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'from', 'and', 'or', 'but', 'if', 'then', 'so', 'as', 'about', 'like', 'through', 'after', 'over', 'between', 'out', 'against', 'during', 'without', 'before', 'under', 'around', 'among'];
       const promptWords = img.prompt
         .toLowerCase()
         .split(/\s+/)
@@ -268,7 +211,6 @@ export default function App() {
       let matchedPhrase = '';
       let totalMatches = 0;
 
-      // Check each keyword from prompt against transcript
       for (const promptWord of promptWords) {
         for (let i = 0; i < words.length; i++) {
           const score = calculateSimilarity(words[i], promptWord);
@@ -286,11 +228,10 @@ export default function App() {
         }
       }
 
-      // If we found good matches
       if (bestMatchTime !== null && totalMatches > 0) {
         const confidence = Math.min((totalMatches / promptWords.length) * bestScore, 1);
         
-        if (confidence > 0.3) {
+        if (confidence > 0.2) {
           matched.push({
             image: img,
             startTime: bestMatchTime,
@@ -307,10 +248,8 @@ export default function App() {
       }
     }
 
-    // Sort by time
     matched.sort((a, b) => a.startTime - b.startTime);
 
-    // Calculate durations
     const finalSynced = matched.map((item, idx) => {
       const nextStart = idx < matched.length - 1 ? matched[idx + 1].startTime : audioDuration;
       return {
@@ -323,7 +262,7 @@ export default function App() {
     setSkippedImages(skipped);
   };
 
-  const startSync = async () => {
+  const startSync = () => {
     if (!audioFile || images.length === 0) {
       setStatusMsg('Pehle audio aur images upload karein!');
       return;
@@ -335,27 +274,19 @@ export default function App() {
       return;
     }
 
-    if (processingRef.current) return;
-    processingRef.current = true;
-
-    setStage('processing');
-    setStageProgress(0);
-    setStageMessage('Narration analyze ho rahi hai...');
-
-    const transcriptText = await transcribeAudio();
-    setTranscript(transcriptText);
-    setStageProgress(100);
-
-    setStageMessage('Prompts ko narration ke saath match kar rahe hain...');
-
-    if (transcriptText) {
-      syncImagesToNarration(transcriptText);
+    if (!transcriptText.trim()) {
+      setStatusMsg('Pehle transcript paste karein!');
+      return;
     }
 
-    await new Promise(r => setTimeout(r, 500));
-    setStage('ready');
-    setStageMessage(`✓ Sync complete!`);
-    processingRef.current = false;
+    setStage('processing');
+    setStageMessage('Images ko narration ke saath sync kar rahe hain...');
+
+    setTimeout(() => {
+      syncImagesToNarration();
+      setStage('ready');
+      setStageMessage(`✓ Sync complete!`);
+    }, 500);
   };
 
   const drawFrame = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, progress: number, effect: EffectType, width: number, height: number) => {
@@ -645,7 +576,7 @@ export default function App() {
               <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
                 VideoForge AI
               </h1>
-              <p className="text-xs text-gray-500">Prompt-Based Narration Sync</p>
+              <p className="text-xs text-gray-500">Narration-Synced Video Creator</p>
             </div>
           </div>
           {audioDuration > 0 && (
@@ -668,7 +599,6 @@ export default function App() {
       )}
 
       <main className="max-w-6xl mx-auto px-4 py-8 space-y-8">
-        {/* Upload Section */}
         <div className="grid md:grid-cols-2 gap-6">
           <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
             <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
@@ -723,7 +653,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Prompts Section */}
         {images.length > 0 && stage === 'prompts' && (
           <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
             <h3 className="font-semibold mb-4 flex items-center gap-2">
@@ -731,69 +660,64 @@ export default function App() {
               Step 3: Image Generation Prompts Paste Karein
             </h3>
             <p className="text-sm text-gray-400 mb-4">
-              Jin prompts se images banai hain wo paste karein. Har prompt ke beech mein empty line dein. AI automatically match karega.
+              Har prompt ke beech mein empty line dein
             </p>
             <textarea
               value={promptsText}
               onChange={(e) => setPromptsText(e.target.value)}
-              placeholder={`Prompt 1 (e.g., A majestic mountain landscape at sunrise with snow-capped peaks)\n\nPrompt 2 (e.g., A busy city street at night with neon lights)\n\nPrompt 3 (e.g., Peaceful ocean waves crashing on a sandy beach)`}
-              className="w-full h-64 bg-gray-800/50 border border-gray-700 rounded-xl p-4 text-sm text-gray-300 focus:outline-none focus:border-purple-500 resize-none font-mono"
+              placeholder={`Prompt 1\n\nPrompt 2\n\nPrompt 3`}
+              className="w-full h-48 bg-gray-800/50 border border-gray-700 rounded-xl p-4 text-sm text-gray-300 focus:outline-none focus:border-purple-500 resize-none font-mono"
             />
-            <div className="flex gap-3 mt-4">
-              <button
-                onClick={parseAndAssignPrompts}
-                disabled={!promptsText.trim()}
-                className="flex items-center gap-2 px-5 py-2.5 bg-purple-500/20 border border-purple-500/50 rounded-lg text-purple-300 hover:bg-purple-500/30 transition-all disabled:opacity-30"
-              >
-                <CheckCircle className="w-4 h-4" />
-                Assign Prompts
-              </button>
-              <button
-                onClick={startSync}
-                disabled={!audioFile || images.filter(i => i.prompt.trim()).length === 0}
-                className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-purple-500 to-pink-500 rounded-lg text-white font-medium hover:opacity-90 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                <Brain className="w-4 h-4" />
-                Analyze & Sync
-              </button>
-            </div>
-            
-            {images.some(i => i.prompt.trim()) && (
-              <div className="mt-6 space-y-2">
-                <p className="text-sm text-gray-400">Assigned Prompts:</p>
-                {images.filter(i => i.prompt.trim()).map((img, idx) => (
-                  <div key={img.id} className="flex items-start gap-3 bg-gray-800/30 rounded-lg p-3">
-                    <img src={img.url} alt="" className="w-12 h-8 object-cover rounded" />
-                    <div className="flex-1">
-                      <p className="text-xs text-gray-500">Image {idx + 1}:</p>
-                      <p className="text-sm text-gray-300">{img.prompt}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            <button
+              onClick={parseAndAssignPrompts}
+              disabled={!promptsText.trim()}
+              className="mt-4 flex items-center gap-2 px-5 py-2.5 bg-purple-500/20 border border-purple-500/50 rounded-lg text-purple-300 hover:bg-purple-500/30 transition-all disabled:opacity-30"
+            >
+              <CheckCircle className="w-4 h-4" />
+              Assign Prompts
+            </button>
           </div>
         )}
 
-        {/* Processing */}
+        {stage === 'transcript' && (
+          <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
+            <h3 className="font-semibold mb-4 flex items-center gap-2">
+              <Mic className="w-5 h-5 text-green-400" />
+              Step 4: Narration Transcript Paste Karein
+            </h3>
+            <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-4">
+              <p className="text-sm text-blue-300">
+                <strong>Important:</strong> Apni audio ka transcript yahan paste karein. Aap kisi bhi speech-to-text tool (Google Docs, Otter.ai, etc.) se transcript generate kar sakte hain.
+              </p>
+            </div>
+            <textarea
+              value={transcriptText}
+              onChange={(e) => setTranscriptText(e.target.value)}
+              placeholder="Apni audio ki transcript yahan paste karein..."
+              className="w-full h-48 bg-gray-800/50 border border-gray-700 rounded-xl p-4 text-sm text-gray-300 focus:outline-none focus:border-purple-500 resize-none"
+            />
+            <button
+              onClick={startSync}
+              disabled={!transcriptText.trim()}
+              className="mt-4 flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <Brain className="w-5 h-5" />
+              Analyze & Sync with Narration
+            </button>
+          </div>
+        )}
+
         {stage === 'processing' && (
           <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 rounded-2xl p-6 border border-purple-500/30">
             <div className="flex items-center gap-4">
               <Loader className="w-8 h-8 animate-spin text-purple-400" />
               <div className="flex-1">
                 <p className="text-purple-300 font-medium">{stageMessage}</p>
-                <div className="w-full bg-gray-700 rounded-full h-2 mt-2 overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-300"
-                    style={{ width: `${stageProgress}%` }}
-                  />
-                </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* Ready - Results */}
         {stage === 'ready' && (
           <>
             <div className="grid md:grid-cols-2 gap-4">
@@ -828,7 +752,7 @@ export default function App() {
                       <div className="flex-1">
                         <p className="text-sm text-gray-300 line-clamp-1">{item.image.prompt}</p>
                         <p className="text-xs text-gray-500">
-                          Matched: "{item.matchedPhrase}" • {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)} • Confidence: {Math.round(item.confidence * 100)}%
+                          "{item.matchedPhrase}" • {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)} • {Math.round(item.confidence * 100)}%
                         </p>
                       </div>
                       <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
@@ -934,8 +858,8 @@ export default function App() {
         {stage === 'idle' && (
           <div className="bg-white/5 rounded-2xl p-12 border border-white/10 text-center">
             <Brain className="w-16 h-16 mx-auto mb-4 text-purple-400/50" />
-            <h3 className="text-xl font-bold mb-2">Prompt-Based Narration Sync</h3>
-            <p className="text-gray-400 mb-6">Image prompts se AI automatically narration ke saath sync karega</p>
+            <h3 className="text-xl font-bold mb-2">Narration-Synced Video Creator</h3>
+            <p className="text-gray-400 mb-6">Images ko narration ke saath perfectly sync karein</p>
             <div className="grid sm:grid-cols-4 gap-4 max-w-3xl mx-auto">
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 font-bold mb-2">1</div>
@@ -949,8 +873,8 @@ export default function App() {
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-400 font-bold mb-2">3</div>
-                <p className="text-sm font-medium">AI Sync</p>
-                <p className="text-xs text-gray-500 mt-1">Auto-match</p>
+                <p className="text-sm font-medium">Transcript</p>
+                <p className="text-xs text-gray-500 mt-1">Paste transcript</p>
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-green-500/20 flex items-center justify-center text-green-400 font-bold mb-2">4</div>
@@ -963,7 +887,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-white/10 mt-16 py-6">
-        <p className="text-center text-gray-600 text-sm">VideoForge AI — Prompt-Based Narration Sync</p>
+        <p className="text-center text-gray-600 text-sm">VideoForge AI — Narration-Synced Video Creator</p>
       </footer>
     </div>
   );
