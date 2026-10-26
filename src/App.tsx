@@ -1,8 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Image as ImageIcon, Music, Play, Pause, Download, Sparkles,
-  Film, Clock, Layers, ZoomIn, Move, Settings, Wand2, Trash2, GripVertical,
-  CheckCircle, AlertCircle, Loader
+  Film, Clock, Layers, Settings, Wand2, Trash2, GripVertical,
+  CheckCircle, AlertCircle, Loader, Mic, Tag, Search, Zap, Brain,
+  ChevronRight, Volume2, X
 } from 'lucide-react';
 
 interface ImageItem {
@@ -11,12 +12,22 @@ interface ImageItem {
   url: string;
   name: string;
   duration: number;
+  startTime: number;
   effect: EffectType;
   img: HTMLImageElement;
   loaded: boolean;
+  keywords: string;
+  matchedAt: number | null;
+}
+
+interface TranscriptWord {
+  word: string;
+  startTime: number;
+  endTime: number;
 }
 
 type EffectType = 'kenburns' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right' | 'fade' | 'none';
+type SyncMode = 'auto' | 'manual' | 'equal';
 
 const EFFECTS: { id: EffectType; name: string }[] = [
   { id: 'kenburns', name: 'Ken Burns' },
@@ -38,13 +49,19 @@ export default function App() {
   const [exportProgress, setExportProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [selectedEffect, setSelectedEffect] = useState<EffectType>('kenburns');
-  const [activeTab, setActiveTab] = useState<'upload' | 'storyboard' | 'preview' | 'export'>('upload');
+  const [activeTab, setActiveTab] = useState<'upload' | 'sync' | 'preview' | 'export'>('upload');
   const [videoUrl, setVideoUrl] = useState<string>('');
   const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
   const [statusMsg, setStatusMsg] = useState('');
 
+  // Transcription state
+  const [transcript, setTranscript] = useState<string>('');
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribeProgress, setTranscribeProgress] = useState(0);
+  const [syncMode, setSyncMode] = useState<SyncMode>('auto');
+  const [editingKeyword, setEditingKeyword] = useState<string | null>(null);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Audio element always rendered (hidden) so ref is never null
   const audioRef = useRef<HTMLAudioElement>(null);
   const animFrameRef = useRef<number>(0);
 
@@ -60,6 +77,7 @@ export default function App() {
       setAudioUrl(url);
       setVideoUrl('');
       setAudioDuration(0);
+      setTranscript('');
     }
   };
 
@@ -82,43 +100,267 @@ export default function App() {
 
     for (const file of fileArray) {
       const { img, url } = await loadImage(file);
-      setImages(prev => {
-        const newImages = [...prev, {
-          id: Math.random().toString(36).substr(2, 9),
-          file,
-          url,
-          name: file.name,
-          duration: 0,
-          effect: selectedEffect,
-          img,
-          loaded: true,
-        }];
-        if (audioDuration > 0) {
-          const dur = audioDuration / newImages.length;
-          return newImages.map(i => ({ ...i, duration: dur }));
-        }
-        return newImages;
-      });
+      // Extract name without extension as default keyword
+      const defaultKeyword = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
+      
+      setImages(prev => [...prev, {
+        id: Math.random().toString(36).substr(2, 9),
+        file,
+        url,
+        name: file.name,
+        duration: 0,
+        startTime: 0,
+        effect: selectedEffect,
+        img,
+        loaded: true,
+        keywords: defaultKeyword,
+        matchedAt: null,
+      }]);
     }
   };
 
-  // Auto-distribute duration
+  // Auto-detect audio duration
   useEffect(() => {
-    if (audioDuration > 0 && images.length > 0) {
-      const durationPerImage = audioDuration / images.length;
-      setImages(prev => prev.map(img => ({ ...img, duration: durationPerImage })));
+    if (!audioUrl) return;
+    const timer = setTimeout(() => {
+      if (audioRef.current && (!audioDuration || audioDuration <= 0)) {
+        const dur = audioRef.current.duration;
+        if (dur && isFinite(dur)) {
+          setAudioDuration(dur);
+        } else {
+          if (audioRef.current) {
+            audioRef.current.currentTime = 1e101;
+            setTimeout(() => {
+              if (audioRef.current) {
+                const d = audioRef.current.duration;
+                if (d && isFinite(d)) setAudioDuration(d);
+                audioRef.current.currentTime = 0;
+              }
+            }, 100);
+          }
+        }
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [audioUrl]);
+
+  // Transcribe audio using Web Speech API
+  const transcribeAudio = async () => {
+    if (!audioFile || !audioUrl) {
+      setStatusMsg('Pehle audio upload karein!');
+      return;
     }
-  }, [audioDuration]);
+
+    setIsTranscribing(true);
+    setTranscribeProgress(0);
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    
+    if (!SpeechRecognition) {
+      setStatusMsg('Aapka browser speech recognition support nahi karta. Chrome use karein ya manually transcript likhein.');
+      setIsTranscribing(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US'; // Can be changed to 'ur-PK' for Urdu
+
+    let fullTranscript = '';
+    const results: { word: string; time: number }[] = [];
+    let startTime = 0;
+
+    // Play audio and recognize simultaneously
+    const audio = new Audio(audioUrl);
+    audio.crossOrigin = 'anonymous';
+    
+    await new Promise<void>((resolve) => {
+      audio.onloadedmetadata = () => {
+        const duration = audio.duration;
+        startTime = Date.now();
+        
+        recognition.onresult = (event: any) => {
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            if (event.results[i].isFinal) {
+              const text = event.results[i][0].transcript;
+              const elapsed = (Date.now() - startTime) / 1000;
+              fullTranscript += text + ' ';
+              results.push({ word: text.trim(), time: elapsed });
+              setTranscribeProgress(Math.min((elapsed / duration) * 100, 95));
+            }
+          }
+        };
+
+        recognition.onend = () => {
+          resolve();
+        };
+
+        recognition.onerror = (event: any) => {
+          console.error('Speech recognition error:', event.error);
+          resolve();
+        };
+
+        recognition.start();
+        audio.play();
+
+        // Stop when audio ends
+        audio.onended = () => {
+          setTimeout(() => {
+            recognition.stop();
+          }, 1000);
+        };
+
+        // Safety timeout
+        setTimeout(() => {
+          try { recognition.stop(); } catch(e) {}
+          audio.pause();
+          resolve();
+        }, (duration + 5) * 1000);
+      };
+    });
+
+    setTranscript(fullTranscript.trim());
+    setTranscribeProgress(100);
+    setIsTranscribing(false);
+    
+    // Auto-sync after transcription
+    if (fullTranscript.trim() && images.length > 0) {
+      autoSyncImages(fullTranscript.trim(), results);
+    }
+  };
+
+  // Auto-sync images based on keywords in transcript
+  const autoSyncImages = (transcriptText: string, timedWords: { word: string; time: number }[]) => {
+    if (images.length === 0 || !transcriptText) return;
+
+    const transcriptLower = transcriptText.toLowerCase();
+    const words = transcriptLower.split(/\s+/);
+    
+    const updatedImages = images.map(img => {
+      const keywords = img.keywords.toLowerCase().split(/[\s,]+/).filter(k => k.length > 2);
+      let bestMatchTime: number | null = null;
+      let bestScore = 0;
+
+      // Search for keywords in transcript
+      for (const keyword of keywords) {
+        for (let i = 0; i < words.length; i++) {
+          // Check if word contains keyword or keyword contains word
+          const score = calculateSimilarity(words[i], keyword);
+          if (score > 0.6 && score > bestScore) {
+            bestScore = score;
+            // Find timestamp for this word position
+            const timeRatio = i / words.length;
+            bestMatchTime = timeRatio * audioDuration;
+          }
+        }
+      }
+
+      // Also check timed words for more accurate timing
+      for (const tw of timedWords) {
+        const twLower = tw.word.toLowerCase();
+        for (const keyword of keywords) {
+          if (twLower.includes(keyword) || keyword.includes(twLower)) {
+            const score = calculateSimilarity(twLower, keyword);
+            if (score > 0.5 && score > bestScore) {
+              bestScore = score;
+              bestMatchTime = tw.time;
+            }
+          }
+        }
+      }
+
+      return {
+        ...img,
+        matchedAt: bestMatchTime,
+      };
+    });
+
+    // Sort by matchedAt time and assign durations
+    const sorted = [...updatedImages].sort((a, b) => (a.matchedAt ?? audioDuration) - (b.matchedAt ?? audioDuration));
+    
+    const finalImages = sorted.map((img, idx) => {
+      const start = img.matchedAt ?? (idx * audioDuration / sorted.length);
+      const nextStart = idx < sorted.length - 1 
+        ? (sorted[idx + 1].matchedAt ?? ((idx + 1) * audioDuration / sorted.length))
+        : audioDuration;
+      return {
+        ...img,
+        startTime: start,
+        duration: Math.max(0.5, nextStart - start),
+      };
+    });
+
+    setImages(finalImages);
+    setStatusMsg(`✓ ${finalImages.filter(i => i.matchedAt !== null).length} images auto-synced!`);
+  };
+
+  // Simple similarity score
+  const calculateSimilarity = (a: string, b: string): number => {
+    if (a === b) return 1;
+    if (a.includes(b) || b.includes(a)) return 0.8;
+    
+    // Levenshtein-based
+    const longer = a.length > b.length ? a : b;
+    const shorter = a.length > b.length ? b : a;
+    if (longer.length === 0) return 1;
+    
+    const editDistance = levenshtein(longer, shorter);
+    return (longer.length - editDistance) / longer.length;
+  };
+
+  const levenshtein = (a: string, b: string): number => {
+    const matrix: number[][] = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    
+    for (let i = 1; i <= b.length; i++) {
+      for (let j = 1; j <= a.length; j++) {
+        if (b.charAt(i - 1) === a.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1,
+            matrix[i][j - 1] + 1,
+            matrix[i - 1][j] + 1
+          );
+        }
+      }
+    }
+    return matrix[b.length][a.length];
+  };
+
+  // Equal distribution mode
+  const distributeEqually = () => {
+    if (images.length === 0 || !audioDuration) return;
+    const dur = audioDuration / images.length;
+    setImages(prev => prev.map((img, idx) => ({
+      ...img,
+      startTime: idx * dur,
+      duration: dur,
+      matchedAt: null,
+    })));
+  };
+
+  // Manual sync - set start time for an image
+  const setManualTime = (id: string, time: number) => {
+    setImages(prev => {
+      const updated = prev.map(img => img.id === id ? { ...img, startTime: time, matchedAt: time } : img);
+      // Recalculate durations based on start times
+      const sorted = [...updated].sort((a, b) => a.startTime - b.startTime);
+      return sorted.map((img, idx) => {
+        const nextStart = idx < sorted.length - 1 ? sorted[idx + 1].startTime : audioDuration;
+        return { ...img, duration: Math.max(0.5, nextStart - img.startTime) };
+      });
+    });
+  };
+
+  const updateKeyword = (id: string, keywords: string) => {
+    setImages(prev => prev.map(img => img.id === id ? { ...img, keywords } : img));
+  };
 
   const removeImage = (id: string) => {
-    setImages(prev => {
-      const filtered = prev.filter(img => img.id !== id);
-      if (audioDuration > 0 && filtered.length > 0) {
-        const durationPerImage = audioDuration / filtered.length;
-        return filtered.map(img => ({ ...img, duration: durationPerImage }));
-      }
-      return filtered;
-    });
+    setImages(prev => prev.filter(img => img.id !== id));
   };
 
   const applyEffectToAll = (effect: EffectType) => {
@@ -207,15 +449,25 @@ export default function App() {
   const getCurrentImageAtTime = (time: number): { img: ImageItem; progress: number } | null => {
     if (images.length === 0) return null;
 
-    let accumulated = 0;
-    for (let i = 0; i < images.length; i++) {
-      const imgItem = images[i];
-      if (time < accumulated + imgItem.duration || i === images.length - 1) {
-        const progress = Math.min((time - accumulated) / imgItem.duration, 1);
-        return { img: imgItem, progress: Math.max(0, progress) };
+    // Find image whose time range contains current time
+    for (const imgItem of images) {
+      if (time >= imgItem.startTime && time < imgItem.startTime + imgItem.duration) {
+        const progress = (time - imgItem.startTime) / imgItem.duration;
+        return { img: imgItem, progress: Math.min(Math.max(progress, 0), 1) };
       }
-      accumulated += imgItem.duration;
     }
+    
+    // If before first image, show first
+    if (images.length > 0 && time < images[0].startTime) {
+      return { img: images[0], progress: 0 };
+    }
+    
+    // If after last image, show last
+    if (images.length > 0) {
+      const last = images[images.length - 1];
+      return { img: last, progress: 1 };
+    }
+    
     return null;
   };
 
@@ -242,19 +494,19 @@ export default function App() {
   const startPreview = () => {
     const audio = audioRef.current;
     if (!audio) {
-      setStatusMsg('Audio element not ready, please wait...');
+      setStatusMsg('Audio element ready nahi hai');
       return;
     }
     if (!audioFile) {
-      setStatusMsg('Please upload audio first!');
+      setStatusMsg('Audio upload karein!');
       return;
     }
     if (images.length === 0) {
-      setStatusMsg('Please upload images first!');
+      setStatusMsg('Images upload karein!');
       return;
     }
     if (!audioDuration || audioDuration <= 0) {
-      setStatusMsg('Audio duration not detected yet. Try playing audio once from Upload tab.');
+      setStatusMsg('Audio duration detect nahi hua');
       return;
     }
 
@@ -282,7 +534,7 @@ export default function App() {
         animate();
       }).catch(err => {
         console.error('Audio play failed:', err);
-        setStatusMsg('Audio play failed: ' + err.message + '. Click again.');
+        setStatusMsg('Audio play failed: ' + err.message);
       });
     }
   };
@@ -299,23 +551,14 @@ export default function App() {
   };
 
   const exportVideo = async () => {
-    const audio = audioRef.current;
-    if (!audioFile) {
-      setStatusMsg('Upload audio first!');
-      return;
-    }
-    if (images.length === 0) {
-      setStatusMsg('Upload images first!');
-      return;
-    }
-    if (!audioDuration || audioDuration <= 0) {
-      setStatusMsg('Audio duration not detected. Play audio once from Upload tab first.');
+    if (!audioFile || images.length === 0 || !audioDuration) {
+      setStatusMsg('Pehle audio, images aur sync complete karein!');
       return;
     }
 
     const allLoaded = images.every(img => img.loaded && img.img.naturalWidth > 0);
     if (!allLoaded) {
-      setStatusMsg('Images still loading, please wait...');
+      setStatusMsg('Images loading hain, wait karein...');
       return;
     }
 
@@ -330,10 +573,6 @@ export default function App() {
     canvas.width = width;
     canvas.height = height;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Setup audio context
     const audioContext = new AudioContext();
     await audioContext.resume();
 
@@ -412,7 +651,6 @@ export default function App() {
       renderCurrentFrame(timeSec);
     }, frameInterval);
 
-    // Safety timeout
     setTimeout(() => {
       clearInterval(renderInterval);
       try { source.stop(); } catch (e) { }
@@ -432,38 +670,13 @@ export default function App() {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Force duration detection with fallback
-  useEffect(() => {
-    if (!audioUrl) return;
-    
-    // Wait a bit for metadata to load, then try to get duration
-    const timer1 = setTimeout(() => {
-      if (audioRef.current && (!audioDuration || audioDuration <= 0)) {
-        const dur = audioRef.current.duration;
-        if (dur && isFinite(dur)) {
-          setAudioDuration(dur);
-        } else {
-          // Fallback: seek to force duration calculation
-          if (audioRef.current) {
-            audioRef.current.currentTime = 1e101;
-            setTimeout(() => {
-              if (audioRef.current) {
-                const d = audioRef.current.duration;
-                if (d && isFinite(d)) {
-                  setAudioDuration(d);
-                }
-                audioRef.current.currentTime = 0;
-              }
-            }, 100);
-          }
-        }
-      }
-    }, 500);
+  const formatTimePrecise = (seconds: number) => {
+    if (!seconds || !isFinite(seconds)) return '0:00.0';
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toFixed(1).padStart(4, '0')}`;
+  };
 
-    return () => clearTimeout(timer1);
-  }, [audioUrl]);
-
-  // Draw initial frame when images change
   useEffect(() => {
     if (images.length > 0 && !isPlaying) {
       renderCurrentFrame(0);
@@ -471,27 +684,23 @@ export default function App() {
   }, [images.length, isPlaying, renderCurrentFrame]);
 
   const readyForVideo = audioFile && images.length > 0 && audioDuration > 0;
+  const isSynced = images.every(img => img.duration > 0 && img.startTime >= 0);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-950/30 to-gray-900 text-white">
-      {/* HIDDEN audio element — always in DOM so ref is always available */}
+      {/* Hidden audio element */}
       {audioUrl && (
         <audio
           ref={audioRef}
           src={audioUrl}
           onLoadedMetadata={(e) => {
             const dur = (e.target as HTMLAudioElement).duration;
-            if (dur && isFinite(dur)) {
-              setAudioDuration(dur);
-            }
+            if (dur && isFinite(dur)) setAudioDuration(dur);
           }}
           onCanPlay={() => {
-            // Fallback: also set duration here in case onLoadedMetadata didn't fire
             if (audioRef.current && (!audioDuration || audioDuration <= 0)) {
               const dur = audioRef.current.duration;
-              if (dur && isFinite(dur)) {
-                setAudioDuration(dur);
-              }
+              if (dur && isFinite(dur)) setAudioDuration(dur);
             }
           }}
           className="hidden"
@@ -508,9 +717,9 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
-                VideoForge
+                VideoForge AI
               </h1>
-              <p className="text-xs text-gray-500">Voice + Images → Video</p>
+              <p className="text-xs text-gray-500">Narration-Synced Video Creator</p>
             </div>
           </div>
           {audioDuration > 0 && (
@@ -525,23 +734,23 @@ export default function App() {
       {/* Tabs */}
       <nav className="border-b border-white/10 bg-black/10">
         <div className="max-w-7xl mx-auto px-4">
-          <div className="flex gap-0">
+          <div className="flex gap-0 overflow-x-auto">
             {([
               { id: 'upload', label: 'Upload', icon: Upload },
-              { id: 'storyboard', label: 'Storyboard', icon: Layers },
+              { id: 'sync', label: 'AI Sync', icon: Brain },
               { id: 'preview', label: 'Preview', icon: Play },
               { id: 'export', label: 'Export', icon: Download },
             ] as const).map(tab => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-all ${activeTab === tab.id
+                className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-all whitespace-nowrap ${activeTab === tab.id
                     ? 'border-purple-500 text-purple-400 bg-purple-500/5'
                     : 'border-transparent text-gray-500 hover:text-gray-300'
                   }`}
               >
                 <tab.icon className="w-4 h-4" />
-                <span className="hidden sm:inline">{tab.label}</span>
+                {tab.label}
               </button>
             ))}
           </div>
@@ -563,7 +772,6 @@ export default function App() {
         {/* Upload Tab */}
         {activeTab === 'upload' && (
           <div className="grid md:grid-cols-2 gap-8">
-            {/* Audio */}
             <div className="space-y-4">
               <h2 className="text-lg font-semibold flex items-center gap-2">
                 <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center">
@@ -594,29 +802,16 @@ export default function App() {
                   </div>
                 )}
               </label>
-
-              {/* Audio info in upload tab */}
-              {audioUrl && (
-                <div className="bg-white/5 rounded-xl p-4 border border-white/10 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-gray-400">Status:</span>
-                    {audioDuration > 0 ? (
-                      <span className="text-sm text-green-400 flex items-center gap-1">
-                        <CheckCircle className="w-4 h-4" />
-                        Duration detected: {formatTime(audioDuration)}
-                      </span>
-                    ) : (
-                      <span className="text-sm text-yellow-400 flex items-center gap-1">
-                        <Loader className="w-4 h-4 animate-spin" />
-                        Detecting duration...
-                      </span>
-                    )}
-                  </div>
+              {audioUrl && audioDuration > 0 && (
+                <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4">
+                  <p className="text-sm text-green-400 flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4" />
+                    Audio ready — Duration: {formatTime(audioDuration)}
+                  </p>
                 </div>
               )}
             </div>
 
-            {/* Images */}
             <div className="space-y-4">
               <h2 className="text-lg font-semibold flex items-center gap-2">
                 <div className="w-8 h-8 rounded-lg bg-pink-500/20 flex items-center justify-center">
@@ -653,95 +848,120 @@ export default function App() {
                 </div>
               )}
             </div>
-
-            {/* Status cards */}
-            <div className="md:col-span-2">
-              <div className="bg-white/5 rounded-xl p-6 border border-white/10">
-                <h3 className="font-semibold mb-4 flex items-center gap-2">
-                  <Sparkles className="w-5 h-5 text-yellow-400" />
-                  Progress
-                </h3>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className={`p-4 rounded-lg transition-all ${audioFile ? 'bg-green-500/10 border border-green-500/30' : 'bg-gray-800/50 border border-gray-700/50'}`}>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Audio</p>
-                    <p className={`font-semibold mt-1 ${audioFile ? 'text-green-400' : 'text-gray-600'}`}>
-                      {audioFile ? '✓ Ready' : 'Pending'}
-                    </p>
-                  </div>
-                  <div className={`p-4 rounded-lg transition-all ${images.length > 0 ? 'bg-green-500/10 border border-green-500/30' : 'bg-gray-800/50 border border-gray-700/50'}`}>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Images</p>
-                    <p className={`font-semibold mt-1 ${images.length > 0 ? 'text-green-400' : 'text-gray-600'}`}>
-                      {images.length > 0 ? `✓ ${images.length} images` : 'Pending'}
-                    </p>
-                  </div>
-                  <div className={`p-4 rounded-lg transition-all ${readyForVideo ? 'bg-green-500/10 border border-green-500/30' : 'bg-gray-800/50 border border-gray-700/50'}`}>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Per Image</p>
-                    <p className={`font-semibold mt-1 ${readyForVideo ? 'text-green-400' : 'text-gray-600'}`}>
-                      {readyForVideo ? `${(audioDuration / images.length).toFixed(1)}s` : '—'}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
           </div>
         )}
 
-        {/* Storyboard Tab */}
-        {activeTab === 'storyboard' && (
+        {/* AI Sync Tab */}
+        {activeTab === 'sync' && (
           <div className="space-y-6">
+            {/* Transcription Section */}
             <div className="bg-white/5 rounded-xl p-6 border border-white/10">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
-                <Wand2 className="w-5 h-5 text-purple-400" />
-                Effects — Apply to All
+                <Mic className="w-5 h-5 text-purple-400" />
+                Step 1: Transcribe Narration
               </h3>
-              <div className="flex flex-wrap gap-2">
-                {EFFECTS.map(effect => (
-                  <button
-                    key={effect.id}
-                    onClick={() => applyEffectToAll(effect.id)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${selectedEffect === effect.id
-                        ? 'bg-purple-500/30 border border-purple-500 text-purple-300 shadow-lg shadow-purple-500/10'
-                        : 'bg-gray-800/80 border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500'
-                      }`}
-                  >
-                    {effect.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="bg-white/5 rounded-xl p-6 border border-white/10">
-              <h3 className="font-semibold mb-4 flex items-center gap-2">
-                <Layers className="w-5 h-5 text-pink-400" />
-                Timeline
-              </h3>
-              {images.length === 0 ? (
-                <div className="text-center py-12 text-gray-500">
-                  <ImageIcon className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                  <p>Upload images to build your storyboard</p>
+              <p className="text-sm text-gray-400 mb-4">
+                Audio ka transcript generate karein. System narration sun kar text mein convert karega.
+              </p>
+              
+              {isTranscribing ? (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <Loader className="w-5 h-5 animate-spin text-purple-400" />
+                    <span className="text-purple-300">Transcribing audio... {Math.round(transcribeProgress)}%</span>
+                  </div>
+                  <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all" style={{ width: `${transcribeProgress}%` }} />
+                  </div>
+                  <p className="text-xs text-gray-500">Audio play ho rahi hai aur speech recognize ho rahi hai. Tab band na karein.</p>
                 </div>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-4">
+                  <button
+                    onClick={transcribeAudio}
+                    disabled={!audioFile || isTranscribing}
+                    className="flex items-center gap-2 px-5 py-2.5 bg-purple-500/20 border border-purple-500/50 rounded-lg text-purple-300 hover:bg-purple-500/30 transition-all disabled:opacity-30"
+                  >
+                    <Mic className="w-4 h-4" />
+                    {transcript ? 'Re-Transcribe Audio' : 'Transcribe Audio'}
+                  </button>
+                  
+                  {transcript && (
+                    <div className="bg-gray-800/50 rounded-lg p-4 border border-white/5">
+                      <p className="text-xs text-gray-500 mb-2">Transcript:</p>
+                      <p className="text-sm text-gray-300 leading-relaxed">{transcript}</p>
+                    </div>
+                  )}
+                  
+                  {!transcript && (
+                    <div>
+                      <p className="text-xs text-gray-500 mb-2">Ya manually transcript likhein:</p>
+                      <textarea
+                        value={transcript}
+                        onChange={(e) => setTranscript(e.target.value)}
+                        placeholder="Apni narration yahan paste karein ya likhein..."
+                        className="w-full bg-gray-800/50 border border-gray-700 rounded-lg p-3 text-sm text-gray-300 focus:outline-none focus:border-purple-500 resize-none"
+                        rows={4}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Keywords & Sync Section */}
+            <div className="bg-white/5 rounded-xl p-6 border border-white/10">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <Tag className="w-5 h-5 text-pink-400" />
+                Step 2: Image Keywords & Sync
+              </h3>
+              <p className="text-sm text-gray-400 mb-4">
+                Har image ke liye keywords dein jo narration mein mention hote hain. System automatically timing match karega.
+              </p>
+
+              {images.length === 0 ? (
+                <p className="text-gray-500 text-center py-8">Pehle images upload karein</p>
+              ) : (
+                <div className="space-y-3">
                   {images.map((img, idx) => (
-                    <div key={img.id} className="flex items-center gap-3 bg-gray-800/40 rounded-xl p-3 border border-white/5 hover:border-white/10 transition-all">
-                      <div className="flex items-center gap-1 text-gray-600">
+                    <div key={img.id} className="flex items-start gap-3 bg-gray-800/40 rounded-xl p-3 border border-white/5">
+                      <div className="flex items-center gap-1 text-gray-600 pt-2">
                         <GripVertical className="w-4 h-4" />
                         <span className="text-xs font-mono w-5 text-center">{idx + 1}</span>
                       </div>
-                      <img src={img.url} alt={img.name} className="w-16 h-10 object-cover rounded-md" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-gray-300 truncate">{img.name}</p>
-                        <p className="text-xs text-gray-500">{img.duration.toFixed(1)}s</p>
+                      <img src={img.url} alt={img.name} className="w-16 h-10 object-cover rounded-md mt-1" />
+                      <div className="flex-1 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <Tag className="w-3.5 h-3.5 text-gray-500" />
+                          <input
+                            type="text"
+                            value={img.keywords}
+                            onChange={(e) => updateKeyword(img.id, e.target.value)}
+                            placeholder="Keywords (comma separated)"
+                            className="flex-1 bg-gray-700/50 border border-gray-600 rounded px-2 py-1 text-sm text-gray-300 focus:outline-none focus:border-purple-500"
+                          />
+                        </div>
+                        <div className="flex items-center gap-3 text-xs">
+                          <span className="text-gray-500">Start:</span>
+                          <input
+                            type="number"
+                            value={img.startTime.toFixed(1)}
+                            onChange={(e) => setManualTime(img.id, parseFloat(e.target.value) || 0)}
+                            step="0.1"
+                            min="0"
+                            max={audioDuration}
+                            className="w-16 bg-gray-700/50 border border-gray-600 rounded px-2 py-0.5 text-gray-300 focus:outline-none focus:border-purple-500"
+                          />
+                          <span className="text-gray-500">Duration:</span>
+                          <span className="text-purple-400">{img.duration.toFixed(1)}s</span>
+                          {img.matchedAt !== null && (
+                            <span className="text-green-400 flex items-center gap-1">
+                              <Zap className="w-3 h-3" />
+                              Auto-matched
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <select
-                        value={img.effect}
-                        onChange={(e) => applyEffectToSingle(img.id, e.target.value as EffectType)}
-                        className="bg-gray-700/80 border border-gray-600 rounded-lg px-3 py-1.5 text-sm text-gray-300 focus:outline-none focus:border-purple-500"
-                      >
-                        {EFFECTS.map(e => (
-                          <option key={e.id} value={e.id}>{e.name}</option>
-                        ))}
-                      </select>
                       <button
                         onClick={() => removeImage(img.id)}
                         className="p-2 rounded-lg hover:bg-red-500/20 text-gray-500 hover:text-red-400 transition-all"
@@ -752,29 +972,116 @@ export default function App() {
                   ))}
                 </div>
               )}
+
+              {/* Sync Buttons */}
+              <div className="flex flex-wrap gap-3 mt-6 pt-4 border-t border-white/5">
+                <button
+                  onClick={() => {
+                    if (transcript && images.length > 0) {
+                      autoSyncImages(transcript, []);
+                    } else {
+                      setStatusMsg('Pehle transcript generate karein!');
+                    }
+                  }}
+                  disabled={images.length === 0 || !transcript}
+                  className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500/50 rounded-lg text-purple-300 hover:from-purple-500/30 hover:to-pink-500/30 transition-all disabled:opacity-30"
+                >
+                  <Brain className="w-4 h-4" />
+                  AI Auto-Sync
+                </button>
+                <button
+                  onClick={distributeEqually}
+                  disabled={images.length === 0 || !audioDuration}
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-700/50 border border-gray-600 rounded-lg text-gray-300 hover:bg-gray-700 transition-all disabled:opacity-30"
+                >
+                  <Layers className="w-4 h-4" />
+                  Equal Distribution
+                </button>
+              </div>
             </div>
 
+            {/* Visual Timeline */}
+            {images.length > 0 && audioDuration > 0 && (
+              <div className="bg-white/5 rounded-xl p-6 border border-white/10">
+                <h3 className="font-semibold mb-4 flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-yellow-400" />
+                  Visual Timeline
+                </h3>
+                <div className="relative h-20 bg-gray-800/50 rounded-lg overflow-hidden border border-white/5">
+                  {/* Time markers */}
+                  <div className="absolute inset-0 flex items-end pb-1 px-2">
+                    {Array.from({ length: 11 }, (_, i) => (
+                      <div key={i} className="absolute text-[9px] text-gray-600" style={{ left: `${i * 10}%` }}>
+                        {formatTime((i / 10) * audioDuration)}
+                      </div>
+                    ))}
+                  </div>
+                  {/* Image blocks */}
+                  {images.map((img, idx) => {
+                    const left = (img.startTime / audioDuration) * 100;
+                    const width = (img.duration / audioDuration) * 100;
+                    return (
+                      <div
+                        key={img.id}
+                        className="absolute top-2 bottom-6 rounded-md overflow-hidden border border-white/20 group cursor-pointer"
+                        style={{ left: `${left}%`, width: `${Math.max(width, 2)}%` }}
+                      >
+                        <img src={img.url} alt={img.name} className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-purple-500/30 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
+                          <span className="text-[10px] font-bold bg-black/70 px-1 rounded">#{idx + 1}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex justify-between mt-2 text-xs text-gray-500">
+                  <span>0:00</span>
+                  <span>{formatTime(audioDuration)}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Effects */}
+            <div className="bg-white/5 rounded-xl p-6 border border-white/10">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <Wand2 className="w-5 h-5 text-purple-400" />
+                Effects
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {EFFECTS.map(effect => (
+                  <button
+                    key={effect.id}
+                    onClick={() => applyEffectToAll(effect.id)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${selectedEffect === effect.id
+                        ? 'bg-purple-500/30 border border-purple-500 text-purple-300'
+                        : 'bg-gray-800/80 border border-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                  >
+                    {effect.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Resolution */}
             <div className="bg-white/5 rounded-xl p-6 border border-white/10">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Settings className="w-5 h-5 text-gray-400" />
-                Video Settings
+                Resolution
               </h3>
-              <div>
-                <label className="text-sm text-gray-400 mb-2 block">Resolution</label>
-                <div className="flex gap-3">
-                  {(['720p', '1080p'] as const).map(res => (
-                    <button
-                      key={res}
-                      onClick={() => setResolution(res)}
-                      className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${resolution === res
-                          ? 'bg-purple-500/30 border border-purple-500 text-purple-300'
-                          : 'bg-gray-800 border border-gray-700 text-gray-400 hover:text-white'
-                        }`}
-                    >
-                      {res === '720p' ? 'HD 720p' : 'Full HD 1080p'}
-                    </button>
-                  ))}
-                </div>
+              <div className="flex gap-3">
+                {(['720p', '1080p'] as const).map(res => (
+                  <button
+                    key={res}
+                    onClick={() => setResolution(res)}
+                    className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${resolution === res
+                        ? 'bg-purple-500/30 border border-purple-500 text-purple-300'
+                        : 'bg-gray-800 border border-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                  >
+                    {res === '720p' ? 'HD 720p' : 'Full HD 1080p'}
+                  </button>
+                ))}
               </div>
             </div>
           </div>
@@ -803,22 +1110,14 @@ export default function App() {
                 <div className="absolute inset-0 flex items-center justify-center bg-black/60">
                   <div className="text-center px-4">
                     <Film className="w-12 h-12 mx-auto mb-3 text-gray-600" />
-                    <p className="text-gray-400 mb-2">
-                      {!audioFile ? 'Step 1: Upload audio' : images.length === 0 ? 'Step 2: Upload images' : 'Audio duration not detected'}
-                    </p>
-                    <p className="text-gray-600 text-sm">
-                      {!audioFile
-                        ? 'Go to Upload tab and add your voiceover'
-                        : images.length === 0
-                          ? 'Go to Upload tab and add images'
-                          : 'Play the audio once from Upload tab to detect duration'}
+                    <p className="text-gray-400">
+                      {!audioFile ? 'Audio upload karein' : images.length === 0 ? 'Images upload karein' : 'AI Sync tab mein timing set karein'}
                     </p>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Player controls */}
             <div className="flex items-center gap-4 bg-white/5 rounded-xl p-4 border border-white/10">
               <button
                 onClick={isPlaying ? stopPreview : startPreview}
@@ -828,7 +1127,7 @@ export default function App() {
                 {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
               </button>
               <div className="flex-1">
-                <div className="h-2 bg-gray-700 rounded-full overflow-hidden cursor-pointer">
+                <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-100"
                     style={{ width: `${audioDuration ? (currentTime / audioDuration) * 100 : 0}%` }}
@@ -839,6 +1138,28 @@ export default function App() {
                 {formatTime(currentTime)} / {formatTime(audioDuration)}
               </span>
             </div>
+
+            {/* Current image info */}
+            {isPlaying && (
+              <div className="bg-white/5 rounded-xl p-4 border border-white/10">
+                {(() => {
+                  const current = getCurrentImageAtTime(currentTime);
+                  if (!current) return null;
+                  return (
+                    <div className="flex items-center gap-3">
+                      <img src={current.img.url} alt="" className="w-12 h-8 object-cover rounded" />
+                      <div>
+                        <p className="text-sm text-gray-300">{current.img.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {formatTimePrecise(current.img.startTime)} → {formatTimePrecise(current.img.startTime + current.img.duration)}
+                          {' • '}{current.img.effect}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
           </div>
         )}
 
@@ -860,27 +1181,19 @@ export default function App() {
                 {isExporting ? 'Exporting Video...' : videoUrl ? 'Video Ready!' : 'Export Video'}
               </h3>
               <p className="text-gray-400 mb-6">
-                {resolution === '1080p' ? '1920×1080' : '1280×720'} • WebM • {images.length} scenes • {formatTime(audioDuration)}
+                {resolution === '1080p' ? '1920×1080' : '1280×720'} • WebM • {images.length} scenes synced to narration
               </p>
 
               {isExporting ? (
                 <div className="max-w-md mx-auto space-y-3">
                   <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-300"
-                      style={{ width: `${exportProgress}%` }}
-                    />
+                    <div className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-300" style={{ width: `${exportProgress}%` }} />
                   </div>
                   <p className="text-purple-400 font-medium text-lg">{exportProgress}%</p>
-                  <p className="text-sm text-gray-500">Rendering frames... Please wait</p>
                 </div>
               ) : videoUrl ? (
                 <div className="space-y-5">
-                  <a
-                    href={videoUrl}
-                    download="videoforge-video.webm"
-                    className="inline-flex items-center gap-2 px-8 py-3.5 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all shadow-lg shadow-purple-500/20"
-                  >
+                  <a href={videoUrl} download="videoforge-synced.webm" className="inline-flex items-center gap-2 px-8 py-3.5 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all shadow-lg shadow-purple-500/20">
                     <Download className="w-5 h-5" />
                     Download Video
                   </a>
@@ -895,47 +1208,16 @@ export default function App() {
                   className="inline-flex items-center gap-2 px-8 py-3.5 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-lg shadow-purple-500/20"
                 >
                   <Film className="w-5 h-5" />
-                  Generate Video
+                  Generate Synced Video
                 </button>
               )}
-
-              {!readyForVideo && !isExporting && !videoUrl && (
-                <div className="mt-6 text-sm text-gray-500">
-                  {!audioFile && <p>⚠ Upload audio first</p>}
-                  {audioFile && images.length === 0 && <p>⚠ Upload images first</p>}
-                  {audioFile && images.length > 0 && !audioDuration && <p>⚠ Play audio once from Upload tab to detect duration</p>}
-                </div>
-              )}
-            </div>
-
-            <div className="bg-white/5 rounded-xl p-6 border border-white/10">
-              <h3 className="font-semibold mb-4 flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-yellow-400" />
-                Steps
-              </h3>
-              <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
-                {[
-                  { n: '1', t: 'Upload Audio', d: 'Your voiceover file' },
-                  { n: '2', t: 'Add Images', d: 'Scene-by-scene images' },
-                  { n: '3', t: 'Set Effects', d: 'Ken Burns, zoom, pan' },
-                  { n: '4', t: 'Export', d: 'Download your video' },
-                ].map(s => (
-                  <div key={s.n} className="text-center p-4 bg-gray-800/30 rounded-xl border border-white/5">
-                    <div className="w-8 h-8 mx-auto rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 font-bold text-sm mb-2">
-                      {s.n}
-                    </div>
-                    <p className="font-medium text-sm">{s.t}</p>
-                    <p className="text-xs text-gray-500 mt-1">{s.d}</p>
-                  </div>
-                ))}
-              </div>
             </div>
           </div>
         )}
       </main>
 
       <footer className="border-t border-white/10 mt-16 py-6">
-        <p className="text-center text-gray-600 text-sm">VideoForge — Voice + Images → Engaging Video</p>
+        <p className="text-center text-gray-600 text-sm">VideoForge AI — Narration-Synced Video Creator</p>
       </footer>
     </div>
   );
