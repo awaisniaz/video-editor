@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Image as ImageIcon, Music, Play, Pause, Download, Sparkles,
   Film, Clock, CheckCircle, AlertCircle, Loader, Zap, Brain,
-  Target, FileText, Edit3
+  Target, Link2
 } from 'lucide-react';
 
 interface ImageItem {
@@ -10,17 +10,25 @@ interface ImageItem {
   file: File;
   url: string;
   name: string;
-  narrationText: string;
+  baseName: string; // filename without extension
   img: HTMLImageElement;
   loaded: boolean;
 }
 
+interface AudioItem {
+  id: string;
+  file: File;
+  url: string;
+  name: string;
+  baseName: string; // filename without extension
+  duration: number;
+}
+
 interface SyncedImage {
   image: ImageItem;
+  audio: AudioItem;
   startTime: number;
   duration: number;
-  wordCount: number;
-  timePercent: number;
   effect: EffectType;
 }
 
@@ -28,13 +36,11 @@ type EffectType = 'kenburns' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right'
 
 const EFFECTS: EffectType[] = ['kenburns', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'fade'];
 
-type Stage = 'idle' | 'uploading' | 'narration' | 'ready';
+type Stage = 'idle' | 'uploading' | 'ready';
 
 export default function App() {
-  const [audioFile, setAudioFile] = useState<File | null>(null);
-  const [audioUrl, setAudioUrl] = useState<string>('');
-  const [audioDuration, setAudioDuration] = useState<number>(0);
   const [images, setImages] = useState<ImageItem[]>([]);
+  const [audios, setAudios] = useState<AudioItem[]>([]);
   const [syncedImages, setSyncedImages] = useState<SyncedImage[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -44,23 +50,12 @@ export default function App() {
   const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
   const [statusMsg, setStatusMsg] = useState('');
   const [stage, setStage] = useState<Stage>('idle');
+  const [totalDuration, setTotalDuration] = useState(0);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
+  const audioRefs = useRef<HTMLAudioElement[]>([]);
   const animFrameRef = useRef<number>(0);
-
-  const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && file.type.startsWith('audio/')) {
-      setAudioFile(file);
-      const url = URL.createObjectURL(file);
-      setAudioUrl(url);
-      setVideoUrl('');
-      setAudioDuration(0);
-      setSyncedImages([]);
-      setStage('uploading');
-    }
-  };
+  const currentAudioIndexRef = useRef<number>(0);
 
   const loadImage = (file: File): Promise<{ img: HTMLImageElement; url: string }> => {
     return new Promise((resolve) => {
@@ -73,94 +68,118 @@ export default function App() {
     });
   };
 
+  const getBaseName = (filename: string): string => {
+    return filename.replace(/\.[^/.]+$/, ''); // Remove extension
+  };
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
     const fileArray = Array.from(files).filter(f => f.type.startsWith('image/'));
     const newImages: ImageItem[] = [];
+    
     for (const file of fileArray) {
       const { img, url } = await loadImage(file);
       newImages.push({
         id: Math.random().toString(36).substr(2, 9),
-        file, url, name: file.name, narrationText: '', img, loaded: true,
+        file, url, name: file.name,
+        baseName: getBaseName(file.name),
+        img, loaded: true,
       });
     }
-    setImages(prev => [...prev, ...newImages]);
-    setStage('narration');
-    setStatusMsg(`${newImages.length} images uploaded - ab narration text dein`);
-  };
-
-  const updateNarration = (id: string, text: string) => {
-    setImages(prev => prev.map(img => img.id === id ? { ...img, narrationText: text } : img));
-  };
-
-  useEffect(() => {
-    if (!audioUrl) return;
-    const timer = setTimeout(() => {
-      if (audioRef.current && (!audioDuration || audioDuration <= 0)) {
-        const dur = audioRef.current.duration;
-        if (dur && isFinite(dur)) {
-          setAudioDuration(dur);
-        } else if (audioRef.current) {
-          audioRef.current.currentTime = 1e101;
-          setTimeout(() => {
-            if (audioRef.current) {
-              const d = audioRef.current.duration;
-              if (d && isFinite(d)) setAudioDuration(d);
-              audioRef.current.currentTime = 0;
-            }
-          }, 100);
-        }
-      }
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [audioUrl]);
-
-  // Main sync function - adjust timing based on narration text length
-  const syncImages = () => {
-    const imagesWithNarration = images.filter(img => img.narrationText.trim());
     
-    if (imagesWithNarration.length === 0) {
-      setStatusMsg('Kam az kam 1 image ka narration text dein!');
-      return;
+    setImages(prev => [...prev, ...newImages]);
+    setStage('uploading');
+    setStatusMsg(`${newImages.length} images uploaded`);
+  };
+
+  const handleAudioUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    const fileArray = Array.from(files).filter(f => f.type.startsWith('audio/'));
+    const newAudios: AudioItem[] = [];
+    
+    for (const file of fileArray) {
+      const url = URL.createObjectURL(file);
+      newAudios.push({
+        id: Math.random().toString(36).substr(2, 9),
+        file, url, name: file.name,
+        baseName: getBaseName(file.name),
+        duration: 0,
+      });
     }
+    
+    setAudios(prev => [...prev, ...newAudios]);
+    setStage('uploading');
+    setStatusMsg(`${newAudios.length} audio files uploaded`);
+  };
 
-    if (!audioDuration || audioDuration <= 0) {
-      setStatusMsg('Audio duration detect nahi hua!');
-      return;
-    }
-
-    // Calculate word count for each image's narration
-    const imagesWithWordCount = imagesWithNarration.map(img => ({
-      image: img,
-      wordCount: img.narrationText.trim().split(/\s+/).length
-    }));
-
-    // Calculate total words
-    const totalWords = imagesWithWordCount.reduce((sum, item) => sum + item.wordCount, 0);
-
-    // Calculate duration for each image based on word count ratio
-    let currentTime = 0;
-    const synced: SyncedImage[] = imagesWithWordCount.map((item, idx) => {
-      const timePercent = (item.wordCount / totalWords) * 100;
-      const duration = (item.wordCount / totalWords) * audioDuration;
-      
-      const syncedImage: SyncedImage = {
-        image: item.image,
-        startTime: currentTime,
-        duration: duration,
-        wordCount: item.wordCount,
-        timePercent: timePercent,
-        effect: EFFECTS[idx % EFFECTS.length],
+  // Get audio duration
+  const getAudioDuration = (url: string): Promise<number> => {
+    return new Promise((resolve) => {
+      const audio = new Audio();
+      audio.src = url;
+      audio.onloadedmetadata = () => {
+        resolve(audio.duration);
       };
-      
-      currentTime += duration;
-      return syncedImage;
+      audio.onerror = () => resolve(0);
+    });
+  };
+
+  // Match images with audios and sync
+  const syncMedia = async () => {
+    if (images.length === 0 || audios.length === 0) {
+      setStatusMsg('Images aur audio files dono upload karein!');
+      return;
+    }
+
+    setStatusMsg('Matching images with audio files...');
+
+    // Get durations for all audios
+    const audiosWithDuration = await Promise.all(
+      audios.map(async (audio) => ({
+        ...audio,
+        duration: await getAudioDuration(audio.url)
+      }))
+    );
+
+    // Match images with audios based on baseName
+    const matched: SyncedImage[] = [];
+    const usedAudios = new Set<string>();
+
+    for (const img of images) {
+      // Find matching audio
+      const matchingAudio = audiosWithDuration.find(
+        audio => audio.baseName === img.baseName && !usedAudios.has(audio.id)
+      );
+
+      if (matchingAudio) {
+        usedAudios.add(matchingAudio.id);
+        matched.push({
+          image: img,
+          audio: matchingAudio,
+          startTime: 0, // Will calculate
+          duration: matchingAudio.duration,
+          effect: EFFECTS[matched.length % EFFECTS.length],
+        });
+      }
+    }
+
+    // Sort by baseName to maintain order
+    matched.sort((a, b) => a.image.baseName.localeCompare(b.image.baseName));
+
+    // Calculate start times
+    let startTime = 0;
+    const finalSynced = matched.map(item => {
+      const syncItem = { ...item, startTime };
+      startTime += item.duration;
+      return syncItem;
     });
 
-    setSyncedImages(synced);
+    setSyncedImages(finalSynced);
+    setTotalDuration(startTime);
     setStage('ready');
-    setStatusMsg(`✓ ${synced.length} images sync ho gayi! Narration length ke hisab se timing adjust hui`);
+    setStatusMsg(`✓ ${finalSynced.length} images synced! Total duration: ${formatTime(startTime)}`);
   };
 
   const drawFrame = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, progress: number, effect: EffectType, width: number, height: number) => {
@@ -243,47 +262,84 @@ export default function App() {
     }
   }, [syncedImages, resolution]);
 
-  const startPreview = () => {
-    const audio = audioRef.current;
-    if (!audio || !audioFile || syncedImages.length === 0 || !audioDuration) {
+  const startPreview = async () => {
+    if (syncedImages.length === 0) {
       setStatusMsg('Pehle sync complete karein!');
       return;
     }
+
     cancelAnimationFrame(animFrameRef.current);
-    audio.currentTime = 0;
-    audio.volume = 1;
-    const playPromise = audio.play();
-    if (playPromise) {
-      playPromise.then(() => {
-        setIsPlaying(true);
-        const animate = () => {
-          const time = audio.currentTime;
-          setCurrentTime(time);
-          renderCurrentFrame(time);
-          if (time >= audioDuration - 0.05 || audio.ended) {
-            setIsPlaying(false);
-            return;
+    currentAudioIndexRef.current = 0;
+
+    // Create audio elements for all synced audios
+    audioRefs.current = syncedImages.map(item => {
+      const audio = new Audio(item.audio.url);
+      return audio;
+    });
+
+    setIsPlaying(true);
+    const startTime = performance.now();
+
+    const animate = () => {
+      const elapsed = (performance.now() - startTime) / 1000;
+      setCurrentTime(elapsed);
+      renderCurrentFrame(elapsed);
+
+      // Play current audio
+      const currentIdx = currentAudioIndexRef.current;
+      if (currentIdx < syncedImages.length) {
+        const currentSynced = syncedImages[currentIdx];
+        const audioTime = elapsed - currentSynced.startTime;
+        
+        if (audioTime >= 0 && audioTime < currentSynced.duration) {
+          const audio = audioRefs.current[currentIdx];
+          if (audio.paused) {
+            audio.currentTime = audioTime;
+            audio.play().catch(() => {});
           }
-          animFrameRef.current = requestAnimationFrame(animate);
-        };
-        animate();
-      }).catch(err => setStatusMsg('Play failed: ' + err.message));
+        }
+
+        // Check if we need to move to next audio
+        if (elapsed >= currentSynced.startTime + currentSynced.duration) {
+          audioRefs.current[currentIdx].pause();
+          currentAudioIndexRef.current++;
+          if (currentAudioIndexRef.current < syncedImages.length) {
+            audioRefs.current[currentAudioIndexRef.current].currentTime = 0;
+            audioRefs.current[currentAudioIndexRef.current].play().catch(() => {});
+          }
+        }
+      }
+
+      if (elapsed >= totalDuration) {
+        setIsPlaying(false);
+        audioRefs.current.forEach(a => a.pause());
+        return;
+      }
+
+      animFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    // Start first audio
+    if (audioRefs.current.length > 0) {
+      audioRefs.current[0].play().catch(() => {});
     }
+
+    animate();
   };
 
   const stopPreview = () => {
     setIsPlaying(false);
     cancelAnimationFrame(animFrameRef.current);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
+    audioRefs.current.forEach(a => {
+      a.pause();
+      a.currentTime = 0;
+    });
     setCurrentTime(0);
     renderCurrentFrame(0);
   };
 
   const exportVideo = async () => {
-    if (!audioFile || syncedImages.length === 0 || !audioDuration) return;
+    if (syncedImages.length === 0 || totalDuration === 0) return;
     setIsExporting(true);
     setExportProgress(0);
     setVideoUrl('');
@@ -296,10 +352,35 @@ export default function App() {
 
     const audioContext = new AudioContext();
     await audioContext.resume();
-    const arrayBuffer = await audioFile.arrayBuffer();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    // Decode all audio files and concatenate them
+    const audioBuffers: AudioBuffer[] = [];
+    for (const item of syncedImages) {
+      const arrayBuffer = await item.audio.file.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      audioBuffers.push(audioBuffer);
+    }
+
+    // Create combined audio buffer
+    const totalSamples = audioBuffers.reduce((sum, buf) => sum + buf.length, 0);
+    const combinedBuffer = audioContext.createBuffer(
+      audioBuffers[0].numberOfChannels,
+      totalSamples,
+      audioBuffers[0].sampleRate
+    );
+
+    let offset = 0;
+    for (const buffer of audioBuffers) {
+      for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+        const combinedData = combinedBuffer.getChannelData(channel);
+        const bufferData = buffer.getChannelData(channel);
+        combinedData.set(bufferData, offset);
+      }
+      offset += buffer.length;
+    }
+
     const source = audioContext.createBufferSource();
-    source.buffer = audioBuffer;
+    source.buffer = combinedBuffer;
     const dest = audioContext.createMediaStreamDestination();
     source.connect(dest);
 
@@ -336,7 +417,7 @@ export default function App() {
     recorder.start(100);
     source.start(0);
 
-    const totalMs = audioDuration * 1000;
+    const totalMs = totalDuration * 1000;
     const startMs = performance.now();
 
     const renderInterval = setInterval(() => {
@@ -347,7 +428,7 @@ export default function App() {
 
       if (progress >= 1) {
         clearInterval(renderInterval);
-        renderCurrentFrame(audioDuration);
+        renderCurrentFrame(totalDuration);
         setTimeout(() => {
           try { source.stop(); } catch (e) { }
           try { if (recorder.state !== 'inactive') recorder.stop(); } catch (e) { }
@@ -393,25 +474,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-950/30 to-gray-900 text-white">
-      {audioUrl && (
-        <audio
-          ref={audioRef}
-          src={audioUrl}
-          onLoadedMetadata={(e) => {
-            const dur = (e.target as HTMLAudioElement).duration;
-            if (dur && isFinite(dur)) setAudioDuration(dur);
-          }}
-          onCanPlay={() => {
-            if (audioRef.current && (!audioDuration || audioDuration <= 0)) {
-              const dur = audioRef.current.duration;
-              if (dur && isFinite(dur)) setAudioDuration(dur);
-            }
-          }}
-          className="hidden"
-          preload="metadata"
-        />
-      )}
-
       <header className="border-b border-white/10 backdrop-blur-xl bg-black/30 sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -422,13 +484,13 @@ export default function App() {
               <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
                 VideoForge AI
               </h1>
-              <p className="text-xs text-gray-500">Har Image ki Narration = Perfect Timing</p>
+              <p className="text-xs text-gray-500">Bulk Upload → Auto Sync → Video Ready</p>
             </div>
           </div>
-          {audioDuration > 0 && (
+          {totalDuration > 0 && (
             <span className="text-sm text-gray-400 flex items-center gap-1.5 bg-white/5 px-3 py-1.5 rounded-full">
               <Clock className="w-3.5 h-3.5" />
-              {formatTime(audioDuration)}
+              {formatTime(totalDuration)}
             </span>
           )}
         </div>
@@ -449,42 +511,17 @@ export default function App() {
         <div className="grid md:grid-cols-2 gap-6">
           <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
             <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center">
-                <Music className="w-4 h-4 text-purple-400" />
-              </div>
-              Step 1: Voiceover Audio
-            </h2>
-            <label className="block border-2 border-dashed border-purple-500/30 rounded-xl p-6 text-center cursor-pointer hover:border-purple-500/60 hover:bg-purple-500/5 transition-all group">
-              <input type="file" accept="audio/*" onChange={handleAudioUpload} className="hidden" />
-              {audioFile ? (
-                <div className="space-y-2">
-                  <CheckCircle className="w-10 h-10 mx-auto text-green-400" />
-                  <p className="text-green-300 font-medium text-sm">{audioFile.name}</p>
-                  <p className="text-xs text-gray-500">{(audioFile.size / 1024 / 1024).toFixed(2)} MB • {formatTime(audioDuration)}</p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <Upload className="w-10 h-10 mx-auto text-gray-500 group-hover:text-purple-400" />
-                  <p className="text-gray-300 font-medium">Audio upload karein</p>
-                  <p className="text-xs text-gray-500">MP3, WAV, OGG</p>
-                </div>
-              )}
-            </label>
-          </div>
-
-          <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
-            <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
               <div className="w-8 h-8 rounded-lg bg-pink-500/20 flex items-center justify-center">
                 <ImageIcon className="w-4 h-4 text-pink-400" />
               </div>
-              Step 2: Images ({images.length})
+              Images ({images.length})
             </h2>
             <label className="block border-2 border-dashed border-pink-500/30 rounded-xl p-6 text-center cursor-pointer hover:border-pink-500/60 hover:bg-pink-500/5 transition-all group">
               <input type="file" accept="image/*" multiple onChange={handleImageUpload} className="hidden" />
               <div className="space-y-2">
                 <ImageIcon className="w-10 h-10 mx-auto text-gray-500 group-hover:text-pink-400" />
-                <p className="text-gray-300 font-medium">Images upload karein</p>
-                <p className="text-xs text-gray-500">Multiple select karein</p>
+                <p className="text-gray-300 font-medium">Images bulk upload karein</p>
+                <p className="text-xs text-gray-500">001.png, 002.png, etc.</p>
               </div>
             </label>
             {images.length > 0 && (
@@ -492,7 +529,34 @@ export default function App() {
                 {images.map((img, idx) => (
                   <div key={img.id} className="relative aspect-video rounded overflow-hidden border border-white/10">
                     <img src={img.url} alt="" className="w-full h-full object-cover" />
-                    <span className="absolute bottom-0 left-0 text-[8px] bg-black/80 px-1 font-mono">#{idx+1}</span>
+                    <span className="absolute bottom-0 left-0 text-[8px] bg-black/80 px-1 font-mono">{img.baseName}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
+            <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center">
+                <Music className="w-4 h-4 text-purple-400" />
+              </div>
+              Audio Files ({audios.length})
+            </h2>
+            <label className="block border-2 border-dashed border-purple-500/30 rounded-xl p-6 text-center cursor-pointer hover:border-purple-500/60 hover:bg-purple-500/5 transition-all group">
+              <input type="file" accept="audio/*" multiple onChange={handleAudioUpload} className="hidden" />
+              <div className="space-y-2">
+                <Music className="w-10 h-10 mx-auto text-gray-500 group-hover:text-purple-400" />
+                <p className="text-gray-300 font-medium">Audio files bulk upload karein</p>
+                <p className="text-xs text-gray-500">001.mp3, 002.mp3, etc.</p>
+              </div>
+            </label>
+            {audios.length > 0 && (
+              <div className="mt-4 space-y-1">
+                {audios.map((audio, idx) => (
+                  <div key={audio.id} className="text-xs text-gray-400 flex items-center gap-2">
+                    <Music className="w-3 h-3" />
+                    {audio.name}
                   </div>
                 ))}
               </div>
@@ -500,63 +564,28 @@ export default function App() {
           </div>
         </div>
 
-        {/* Narration Input Section */}
-        {images.length > 0 && stage === 'narration' && (
-          <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
-            <h3 className="font-semibold mb-4 flex items-center gap-2">
-              <Edit3 className="w-5 h-5 text-yellow-400" />
-              Step 3: Har Image ka Narration Text Dein
-            </h3>
+        {/* Sync Button */}
+        {images.length > 0 && audios.length > 0 && stage === 'uploading' && (
+          <div className="bg-white/5 rounded-2xl p-6 border border-white/10 text-center">
             <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-4">
               <p className="text-sm text-blue-300 mb-2">
-                <strong>Kaise kaam karega:</strong> Har image ke liye uska narration text likhein. Jis image ka narration lamba hai, usko zyada time milega. Jis ka chhota hai, usko kam time.
+                <strong>Auto-Match:</strong> System automatically match karega:
               </p>
               <p className="text-xs text-gray-400">
-                Example: Agar image 1 ka narration 20 words ka hai aur image 2 ka 10 words ka hai, toh image 1 ko double time milega.
+                001.png ↔ 001.mp3, 002.png ↔ 002.mp3, etc.
               </p>
             </div>
-            
-            <div className="space-y-4">
-              {images.map((img, idx) => (
-                <div key={img.id} className="bg-gray-800/40 rounded-xl p-4 border border-white/5">
-                  <div className="flex items-start gap-4">
-                    <div className="flex-shrink-0">
-                      <img src={img.url} alt="" className="w-24 h-16 object-cover rounded-lg" />
-                      <p className="text-xs text-gray-500 mt-1 text-center">Image #{idx + 1}</p>
-                    </div>
-                    <div className="flex-1">
-                      <label className="text-sm text-gray-400 mb-2 block">
-                        Narration for this image:
-                      </label>
-                      <textarea
-                        value={img.narrationText}
-                        onChange={(e) => updateNarration(img.id, e.target.value)}
-                        placeholder="Yahan wo text likhein jo narrator is image ke liye bolega..."
-                        className="w-full h-24 bg-gray-700/50 border border-gray-600 rounded-lg p-3 text-sm text-gray-300 focus:outline-none focus:border-purple-500 resize-none"
-                      />
-                      {img.narrationText.trim() && (
-                        <p className="text-xs text-gray-500 mt-1">
-                          {img.narrationText.trim().split(/\s+/).length} words
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-
             <button
-              onClick={syncImages}
-              disabled={images.filter(i => i.narrationText.trim()).length === 0 || !audioDuration}
-              className="mt-6 w-full flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              onClick={syncMedia}
+              className="inline-flex items-center gap-2 px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all shadow-lg shadow-purple-500/20"
             >
               <Zap className="w-5 h-5" />
-              Sync Images with Narration
+              Auto Sync & Create Video
             </button>
           </div>
         )}
 
-        {/* Results Section */}
+        {/* Results */}
         {stage === 'ready' && syncedImages.length > 0 && (
           <>
             <div className="bg-green-500/10 rounded-xl p-4 border border-green-500/30">
@@ -565,47 +594,38 @@ export default function App() {
                 <h3 className="font-semibold text-green-300">✓ {syncedImages.length} Images Synced!</h3>
               </div>
               <p className="text-xs text-gray-400">
-                Narration length ke hisab se timing adjust hui • Total: {formatTime(audioDuration)}
+                Har image ko uski audio ki duration ke mutabiq time mila • Total: {formatTime(totalDuration)}
               </p>
             </div>
 
             <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
-                <Zap className="w-5 h-5 text-yellow-400" />
-                Synced Timeline
+                <Link2 className="w-5 h-5 text-yellow-400" />
+                Matched Pairs
               </h3>
-              <div className="space-y-3">
-                {syncedImages.map((item, idx) => (
-                  <div key={item.image.id} className="bg-gray-800/40 rounded-lg p-4 border border-white/5">
-                    <div className="flex items-start gap-4">
-                      <span className="text-sm font-mono text-gray-500 mt-1">#{idx+1}</span>
-                      <img src={item.image.url} alt="" className="w-20 h-14 object-cover rounded-lg" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-gray-300 mb-2">{item.image.narrationText}</p>
-                        <div className="flex items-center gap-4 text-xs flex-wrap">
-                          <span className="text-green-400 font-semibold">
-                            ⏱ {formatTimePrecise(item.startTime)} → {formatTimePrecise(item.startTime + item.duration)}
-                          </span>
-                          <span className="text-purple-400 font-semibold">
-                            {item.duration.toFixed(1)}s
-                          </span>
-                          <span className="text-gray-500">
-                            {item.wordCount} words • {item.timePercent.toFixed(1)}% time
-                          </span>
-                        </div>
-                        <div className="mt-2">
-                          <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
-                            <div 
-                              className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full"
-                              style={{ width: `${item.timePercent}%` }}
-                            />
-                          </div>
-                        </div>
+              <div className="space-y-2">
+                {syncedImages.map((item, idx) => {
+                  const durationPercent = (item.duration / totalDuration) * 100;
+                  return (
+                    <div key={item.image.id} className="flex items-center gap-3 bg-gray-800/40 rounded-lg p-3 border border-white/5">
+                      <span className="text-xs font-mono text-gray-500 w-6">#{idx+1}</span>
+                      <img src={item.image.url} alt="" className="w-16 h-10 object-cover rounded" />
+                      <div className="flex-1">
+                        <p className="text-sm text-gray-300">{item.image.baseName}</p>
+                        <p className="text-xs text-gray-500">
+                          {item.image.name} ↔ {item.audio.name}
+                        </p>
+                        <p className="text-xs text-green-400 mt-1">
+                          ⏱ {formatTimePrecise(item.startTime)} → {formatTimePrecise(item.startTime + item.duration)} • {item.duration.toFixed(1)}s
+                        </p>
                       </div>
-                      <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded whitespace-nowrap">{item.effect}</span>
+                      <div className="text-right">
+                        <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
+                        <p className="text-xs text-gray-500 mt-1">{durationPercent.toFixed(0)}%</p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -643,12 +663,12 @@ export default function App() {
                   <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-100"
-                      style={{ width: `${audioDuration ? (currentTime / audioDuration) * 100 : 0}%` }}
+                      style={{ width: `${totalDuration ? (currentTime / totalDuration) * 100 : 0}%` }}
                     />
                   </div>
                 </div>
                 <span className="text-sm text-gray-400 font-mono">
-                  {formatTime(currentTime)} / {formatTime(audioDuration)}
+                  {formatTime(currentTime)} / {formatTime(totalDuration)}
                 </span>
               </div>
             </div>
@@ -707,23 +727,23 @@ export default function App() {
         {stage === 'idle' && (
           <div className="bg-white/5 rounded-2xl p-12 border border-white/10 text-center">
             <Brain className="w-16 h-16 mx-auto mb-4 text-purple-400/50" />
-            <h3 className="text-xl font-bold mb-2">Simple & Perfect Sync</h3>
-            <p className="text-gray-400 mb-6">Har image ka narration text dein, timing automatically adjust ho jayegi</p>
+            <h3 className="text-xl font-bold mb-2">Bulk Upload → Auto Sync → Video Ready</h3>
+            <p className="text-gray-400 mb-6">Bas images aur audio files upload karein, baaki sab automatic</p>
             <div className="grid sm:grid-cols-3 gap-4 max-w-2xl mx-auto">
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 font-bold mb-2">1</div>
-                <p className="text-sm font-medium">Upload</p>
-                <p className="text-xs text-gray-500 mt-1">Audio + Images</p>
+                <p className="text-sm font-medium">Bulk Upload</p>
+                <p className="text-xs text-gray-500 mt-1">Images + Audio</p>
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-pink-500/20 flex items-center justify-center text-pink-400 font-bold mb-2">2</div>
-                <p className="text-sm font-medium">Narration</p>
-                <p className="text-xs text-gray-500 mt-1">Text for each image</p>
+                <p className="text-sm font-medium">Auto Match</p>
+                <p className="text-xs text-gray-500 mt-1">001.png ↔ 001.mp3</p>
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-green-500/20 flex items-center justify-center text-green-400 font-bold mb-2">3</div>
-                <p className="text-sm font-medium">Done!</p>
-                <p className="text-xs text-gray-500 mt-1">Perfect video</p>
+                <p className="text-sm font-medium">Video Ready</p>
+                <p className="text-xs text-gray-500 mt-1">Download karein</p>
               </div>
             </div>
           </div>
@@ -731,7 +751,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-white/10 mt-16 py-6">
-        <p className="text-center text-gray-600 text-sm">VideoForge AI — Narration-Based Video Creation</p>
+        <p className="text-center text-gray-600 text-sm">VideoForge AI — Bulk Upload, Auto Sync, Perfect Video</p>
       </footer>
     </div>
   );
