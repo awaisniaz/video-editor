@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Image as ImageIcon, Music, Play, Pause, Download, Sparkles,
   Film, Clock, CheckCircle, AlertCircle, Loader, Zap, Brain,
-  Target, Link2
+  Target, Link2, FileText
 } from 'lucide-react';
 
 interface ImageItem {
@@ -30,6 +30,13 @@ interface SyncedImage {
   startTime: number;
   duration: number;
   effect: EffectType;
+  caption?: string;
+}
+
+interface Caption {
+  text: string;
+  startTime: number;
+  endTime: number;
 }
 
 type EffectType = 'kenburns' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right' | 'fade';
@@ -51,6 +58,10 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState('');
   const [stage, setStage] = useState<Stage>('idle');
   const [totalDuration, setTotalDuration] = useState(0);
+  const [captions, setCaptions] = useState<Caption[]>([]);
+  const [captionStyle, setCaptionStyle] = useState<'bottom' | 'top' | 'center'>('bottom');
+  const [captionSize, setCaptionSize] = useState<'small' | 'medium' | 'large'>('medium');
+  const [captionColor, setCaptionColor] = useState<'white' | 'yellow' | 'cyan'>('white');
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioRefs = useRef<HTMLAudioElement[]>([]);
@@ -126,6 +137,62 @@ export default function App() {
     });
   };
 
+  // Handle caption file upload (SRT or TXT format)
+  const handleCaptionUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const text = await file.text();
+    const parsedCaptions: Caption[] = [];
+
+    // Try SRT format first
+    const srtRegex = /(\d+)\n(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\n([\s\S]*?)(?=\n\n|\n*$)/g;
+    let match;
+    
+    while ((match = srtRegex.exec(text)) !== null) {
+      const startTime = parseSrtTime(match[2]);
+      const endTime = parseSrtTime(match[3]);
+      const captionText = match[4].replace(/\n/g, ' ').trim();
+      
+      if (captionText) {
+        parsedCaptions.push({
+          text: captionText,
+          startTime,
+          endTime
+        });
+      }
+    }
+
+    // If no SRT format found, treat as simple text (one caption per line)
+    if (parsedCaptions.length === 0) {
+      const lines = text.split('\n').filter(line => line.trim());
+      const durationPerCaption = totalDuration / lines.length;
+      
+      lines.forEach((line, idx) => {
+        parsedCaptions.push({
+          text: line.trim(),
+          startTime: idx * durationPerCaption,
+          endTime: (idx + 1) * durationPerCaption
+        });
+      });
+    }
+
+    setCaptions(parsedCaptions);
+    setStatusMsg(`✓ ${parsedCaptions.length} captions loaded!`);
+  };
+
+  // Parse SRT time format (HH:MM:SS,mmm) to seconds
+  const parseSrtTime = (timeStr: string): number => {
+    const parts = timeStr.split(':');
+    const hours = parseInt(parts[0]);
+    const minutes = parseInt(parts[1]);
+    const secondsParts = parts[2].split(',');
+    const seconds = parseInt(secondsParts[0]);
+    const milliseconds = parseInt(secondsParts[1]);
+    
+    return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
+  };
+
   // Match images with audios and sync
   const syncMedia = async () => {
     if (images.length === 0 || audios.length === 0) {
@@ -182,7 +249,7 @@ export default function App() {
     setStatusMsg(`✓ ${finalSynced.length} images synced! Total duration: ${formatTime(startTime)}`);
   };
 
-  const drawFrame = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, progress: number, effect: EffectType, width: number, height: number) => {
+  const drawFrame = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, progress: number, effect: EffectType, width: number, height: number, time?: number) => {
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, width, height);
     if (!img || !img.naturalWidth) return;
@@ -231,6 +298,79 @@ export default function App() {
     gradient.addColorStop(1, 'rgba(0,0,0,0.25)');
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, width, height);
+
+    // Draw captions if time is provided
+    if (time !== undefined && captions.length > 0) {
+      drawCaptions(ctx, time, width, height);
+    }
+  };
+
+  // Draw captions on canvas
+  const drawCaptions = (ctx: CanvasRenderingContext2D, time: number, width: number, height: number) => {
+    const currentCaption = captions.find(
+      cap => time >= cap.startTime && time <= cap.endTime
+    );
+
+    if (!currentCaption) return;
+
+    // Caption styling
+    const fontSize = captionSize === 'small' ? height * 0.03 : 
+                     captionSize === 'large' ? height * 0.06 : 
+                     height * 0.045;
+    
+    const color = captionColor === 'yellow' ? '#FFD700' : 
+                  captionColor === 'cyan' ? '#00FFFF' : 
+                  '#FFFFFF';
+
+    const yPos = captionStyle === 'top' ? height * 0.15 : 
+                 captionStyle === 'center' ? height * 0.5 : 
+                 height * 0.88;
+
+    ctx.save();
+    ctx.font = `bold ${fontSize}px Arial, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Word wrap
+    const maxWidth = width * 0.85;
+    const words = currentCaption.text.split(' ');
+    const lines: string[] = [];
+    let currentLine = '';
+
+    for (const word of words) {
+      const testLine = currentLine + (currentLine ? ' ' : '') + word;
+      const metrics = ctx.measureText(testLine);
+      
+      if (metrics.width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+
+    // Draw background
+    const lineHeight = fontSize * 1.3;
+    const bgHeight = lines.length * lineHeight + 20;
+    const bgY = yPos - (lines.length * lineHeight) / 2 - 10;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(width * 0.05, bgY, width * 0.9, bgHeight);
+
+    // Draw text with shadow
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
+    ctx.fillStyle = color;
+
+    lines.forEach((line, idx) => {
+      const y = yPos + (idx - (lines.length - 1) / 2) * lineHeight;
+      ctx.fillText(line, width / 2, y);
+    });
+
+    ctx.restore();
   };
 
   const getCurrentImageAtTime = (time: number): { img: SyncedImage; progress: number } | null => {
@@ -255,12 +395,12 @@ export default function App() {
     if (!ctx) return;
     const result = getCurrentImageAtTime(time);
     if (result && result.img.image.loaded) {
-      drawFrame(ctx, result.img.image.img, result.progress, result.img.effect, width, height);
+      drawFrame(ctx, result.img.image.img, result.progress, result.img.effect, width, height, time);
     } else {
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, width, height);
     }
-  }, [syncedImages, resolution]);
+  }, [syncedImages, resolution, captions, captionStyle, captionSize, captionColor]);
 
   const startPreview = async () => {
     if (syncedImages.length === 0) {
@@ -585,6 +725,122 @@ export default function App() {
           </div>
         )}
 
+        {/* Captions Section - Optional */}
+        {images.length > 0 && audios.length > 0 && (stage === 'uploading' || stage === 'ready') && (
+          <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
+            <h3 className="font-semibold mb-4 flex items-center gap-2">
+              <FileText className="w-5 h-5 text-cyan-400" />
+              Captions / Subtitles (Optional)
+            </h3>
+            
+            <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-lg p-4 mb-4">
+              <p className="text-sm text-cyan-300 mb-2">
+                <strong>Captions add karein:</strong> SRT file ya simple text file upload karein
+              </p>
+              <p className="text-xs text-gray-400">
+                SRT format: <code className="bg-black/30 px-1 rounded">00:00:01,000 --&gt; 00:00:03,000</code><br/>
+                Simple text: Har line ek caption (timing automatically divide hogi)
+              </p>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-4">
+              <label className="block border-2 border-dashed border-cyan-500/30 rounded-xl p-4 text-center cursor-pointer hover:border-cyan-500/60 hover:bg-cyan-500/5 transition-all group">
+                <input type="file" accept=".srt,.txt" onChange={handleCaptionUpload} className="hidden" />
+                <div className="space-y-2">
+                  <FileText className="w-8 h-8 mx-auto text-gray-500 group-hover:text-cyan-400" />
+                  <p className="text-gray-300 font-medium text-sm">Upload Captions File</p>
+                  <p className="text-xs text-gray-500">.srt or .txt</p>
+                </div>
+              </label>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Position</label>
+                  <div className="flex gap-2">
+                    {(['top', 'center', 'bottom'] as const).map(pos => (
+                      <button
+                        key={pos}
+                        onClick={() => setCaptionStyle(pos)}
+                        className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                          captionStyle === pos 
+                            ? 'bg-cyan-500/30 border border-cyan-500 text-cyan-300' 
+                            : 'bg-gray-800 border border-gray-700 text-gray-400'
+                        }`}
+                      >
+                        {pos}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Size</label>
+                  <div className="flex gap-2">
+                    {(['small', 'medium', 'large'] as const).map(size => (
+                      <button
+                        key={size}
+                        onClick={() => setCaptionSize(size)}
+                        className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                          captionSize === size 
+                            ? 'bg-cyan-500/30 border border-cyan-500 text-cyan-300' 
+                            : 'bg-gray-800 border border-gray-700 text-gray-400'
+                        }`}
+                      >
+                        {size}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Color</label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setCaptionColor('white')}
+                      className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                        captionColor === 'white' 
+                          ? 'bg-white/20 border border-white text-white' 
+                          : 'bg-gray-800 border border-gray-700 text-gray-400'
+                      }`}
+                    >
+                      White
+                    </button>
+                    <button
+                      onClick={() => setCaptionColor('yellow')}
+                      className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                        captionColor === 'yellow' 
+                          ? 'bg-yellow-500/20 border border-yellow-500 text-yellow-300' 
+                          : 'bg-gray-800 border border-gray-700 text-gray-400'
+                      }`}
+                    >
+                      Yellow
+                    </button>
+                    <button
+                      onClick={() => setCaptionColor('cyan')}
+                      className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                        captionColor === 'cyan' 
+                          ? 'bg-cyan-500/20 border border-cyan-500 text-cyan-300' 
+                          : 'bg-gray-800 border border-gray-700 text-gray-400'
+                      }`}
+                    >
+                      Cyan
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {captions.length > 0 && (
+              <div className="mt-4 p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
+                <p className="text-sm text-green-300 flex items-center gap-2">
+                  <CheckCircle className="w-4 h-4" />
+                  {captions.length} captions loaded successfully!
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Results */}
         {stage === 'ready' && syncedImages.length > 0 && (
           <>
@@ -595,6 +851,7 @@ export default function App() {
               </div>
               <p className="text-xs text-gray-400">
                 Har image ko uski audio ki duration ke mutabiq time mila • Total: {formatTime(totalDuration)}
+                {captions.length > 0 && ` • ${captions.length} captions active`}
               </p>
             </div>
 
