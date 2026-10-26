@@ -189,10 +189,13 @@ export default function App() {
     if (images.length === 0 || !audioDuration || !transcriptText.trim()) return;
 
     const transcriptLower = transcriptText.toLowerCase();
-    const words = transcriptLower.split(/\s+/).filter(w => w.length > 0);
+    const transcriptWords = transcriptLower.split(/\s+/).filter(w => w.length > 0);
     
     const matched: SyncedImage[] = [];
     const skipped: ImageItem[] = [];
+
+    // Simple stop words - sirf basic
+    const stopWords = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or', 'but', 'with', 'by', 'from', 'as', 'it', 'its']);
 
     for (const img of images) {
       if (!img.prompt.trim()) {
@@ -200,56 +203,76 @@ export default function App() {
         continue;
       }
 
-      const stopWords = ['a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'from', 'and', 'or', 'but', 'if', 'then', 'so', 'as', 'about', 'like', 'through', 'after', 'over', 'between', 'out', 'against', 'during', 'without', 'before', 'under', 'around', 'among'];
+      // Extract meaningful words from prompt
       const promptWords = img.prompt
         .toLowerCase()
-        .split(/\s+/)
-        .filter(w => w.length > 2 && !stopWords.includes(w));
+        .split(/[\s,.-]+/)
+        .filter(w => w.length > 3 && !stopWords.has(w));
+
+      if (promptWords.length === 0) {
+        skipped.push(img);
+        continue;
+      }
 
       let bestMatchTime: number | null = null;
       let bestScore = 0;
       let matchedPhrase = '';
-      let totalMatches = 0;
+      let matchCount = 0;
 
+      // Simple matching: check if any prompt word appears in transcript
       for (const promptWord of promptWords) {
-        for (let i = 0; i < words.length; i++) {
-          const score = calculateSimilarity(words[i], promptWord);
-          if (score > 0.6) {
-            totalMatches++;
-            const timeRatio = i / words.length;
+        for (let i = 0; i < transcriptWords.length; i++) {
+          const transcriptWord = transcriptWords[i];
+          
+          // Direct match or contains
+          if (transcriptWord === promptWord || 
+              transcriptWord.includes(promptWord) || 
+              promptWord.includes(transcriptWord)) {
+            
+            matchCount++;
+            const timeRatio = i / transcriptWords.length;
             const matchTime = timeRatio * audioDuration;
             
-            if (score > bestScore) {
-              bestScore = score;
+            // Take the first match (earliest time)
+            if (bestMatchTime === null) {
               bestMatchTime = matchTime;
               matchedPhrase = promptWord;
+              bestScore = 1;
             }
+            break; // Found match for this word, move to next
+          }
+          
+          // Fuzzy match with lower threshold
+          const score = calculateSimilarity(transcriptWord, promptWord);
+          if (score > 0.7 && score > bestScore) {
+            bestScore = score;
+            const timeRatio = i / transcriptWords.length;
+            bestMatchTime = timeRatio * audioDuration;
+            matchedPhrase = promptWord;
+            matchCount++;
           }
         }
       }
 
-      if (bestMatchTime !== null && totalMatches > 0) {
-        const confidence = Math.min((totalMatches / promptWords.length) * bestScore, 1);
-        
-        if (confidence > 0.2) {
-          matched.push({
-            image: img,
-            startTime: bestMatchTime,
-            duration: 0,
-            matchedPhrase,
-            confidence,
-            effect: EFFECTS[Math.floor(Math.random() * EFFECTS.length)],
-          });
-        } else {
-          skipped.push(img);
-        }
+      // If we found at least one match
+      if (bestMatchTime !== null && matchCount > 0) {
+        matched.push({
+          image: img,
+          startTime: bestMatchTime,
+          duration: 0,
+          matchedPhrase,
+          confidence: matchCount / promptWords.length,
+          effect: EFFECTS[Math.floor(Math.random() * EFFECTS.length)],
+        });
       } else {
         skipped.push(img);
       }
     }
 
+    // Sort by time
     matched.sort((a, b) => a.startTime - b.startTime);
 
+    // Calculate durations
     const finalSynced = matched.map((item, idx) => {
       const nextStart = idx < matched.length - 1 ? matched[idx + 1].startTime : audioDuration;
       return {
@@ -258,8 +281,25 @@ export default function App() {
       };
     });
 
-    setSyncedImages(finalSynced);
-    setSkippedImages(skipped);
+    // If no matches found, use fallback: equal distribution
+    if (finalSynced.length === 0) {
+      setStatusMsg('Koi match nahi mila. Equal distribution use ho rahi hai...');
+      const durationPerImage = audioDuration / images.length;
+      const fallbackSynced = images.map((img, idx) => ({
+        image: img,
+        startTime: idx * durationPerImage,
+        duration: durationPerImage,
+        matchedPhrase: 'equal-distribution',
+        confidence: 0,
+        effect: EFFECTS[idx % EFFECTS.length],
+      }));
+      setSyncedImages(fallbackSynced);
+      setSkippedImages([]);
+    } else {
+      setSyncedImages(finalSynced);
+      setSkippedImages(skipped);
+      setStatusMsg(`✓ ${finalSynced.length} images synced! ${skipped.length} skipped.`);
+    }
   };
 
   const startSync = () => {
@@ -686,10 +726,22 @@ export default function App() {
               Step 4: Narration Transcript Paste Karein
             </h3>
             <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-4">
-              <p className="text-sm text-blue-300">
-                <strong>Important:</strong> Apni audio ka transcript yahan paste karein. Aap kisi bhi speech-to-text tool (Google Docs, Otter.ai, etc.) se transcript generate kar sakte hain.
+              <p className="text-sm text-blue-300 mb-2">
+                <strong>Important:</strong> Apni audio ka transcript yahan paste karein.
+              </p>
+              <p className="text-xs text-gray-400">
+                Kisi bhi speech-to-text tool se transcript generate karein: Google Docs (Tools → Voice typing), Otter.ai, ya koi bhi tool.
               </p>
             </div>
+            
+            {/* Example */}
+            <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4 mb-4">
+              <p className="text-xs text-gray-400 mb-2 font-semibold">Example (agar aapki images mountains, city, ocean ki hain):</p>
+              <p className="text-xs text-gray-500 italic">
+                "We started our journey in the beautiful mountains, then we drove through the busy city streets, and finally we reached the peaceful ocean beach..."
+              </p>
+            </div>
+            
             <textarea
               value={transcriptText}
               onChange={(e) => setTranscriptText(e.target.value)}
@@ -752,12 +804,25 @@ export default function App() {
                       <div className="flex-1">
                         <p className="text-sm text-gray-300 line-clamp-1">{item.image.prompt}</p>
                         <p className="text-xs text-gray-500">
-                          "{item.matchedPhrase}" • {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)} • {Math.round(item.confidence * 100)}%
+                          Matched: "<span className="text-green-400">{item.matchedPhrase}</span>" • 
+                          Time: {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)} • 
+                          Confidence: {Math.round(item.confidence * 100)}%
                         </p>
                       </div>
                       <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
                     </div>
                   ))}
+                </div>
+                
+                {/* Debug Info */}
+                <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                  <p className="text-xs text-blue-300 mb-2 font-semibold">Debug Info:</p>
+                  <p className="text-xs text-gray-400">
+                    Total Images: {images.length} | Synced: {syncedImages.length} | Skipped: {skippedImages.length} | Audio Duration: {formatTime(audioDuration)}
+                  </p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Transcript Words: {transcriptText.split(/\s+/).filter(w => w.length > 0).length}
+                  </p>
                 </div>
               </div>
             )}
