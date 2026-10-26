@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Image as ImageIcon, Music, Play, Pause, Download, Sparkles,
   Film, Clock, CheckCircle, AlertCircle, Loader, Zap, Brain,
-  Target, SkipForward
+  Target, SkipForward, Edit3, Tag
 } from 'lucide-react';
 
 interface ImageItem {
@@ -10,7 +10,7 @@ interface ImageItem {
   file: File;
   url: string;
   name: string;
-  keywords: string[];
+  description: string;
   img: HTMLImageElement;
   loaded: boolean;
 }
@@ -19,7 +19,7 @@ interface SyncedImage {
   image: ImageItem;
   startTime: number;
   duration: number;
-  matchedKeyword: string;
+  matchedPhrase: string;
   effect: EffectType;
 }
 
@@ -27,7 +27,7 @@ type EffectType = 'kenburns' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right'
 
 const EFFECTS: EffectType[] = ['kenburns', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'fade'];
 
-type Stage = 'idle' | 'uploading' | 'processing' | 'ready';
+type Stage = 'idle' | 'uploading' | 'describing' | 'processing' | 'ready';
 
 export default function App() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
@@ -81,16 +81,6 @@ export default function App() {
     });
   };
 
-  const extractKeywords = (filename: string): string[] => {
-    return filename
-      .replace(/\.[^/.]+$/, '')
-      .replace(/[-_]/g, ' ')
-      .replace(/\d+/g, '')
-      .split(/\s+/)
-      .filter(w => w.length > 2)
-      .map(w => w.toLowerCase());
-  };
-
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
@@ -100,21 +90,24 @@ export default function App() {
 
     for (const file of fileArray) {
       const { img, url } = await loadImage(file);
-      const keywords = extractKeywords(file.name);
       newImages.push({
         id: Math.random().toString(36).substr(2, 9),
         file,
         url,
         name: file.name,
-        keywords,
+        description: '', // User will fill this
         img,
         loaded: true,
       });
     }
 
     setImages(prev => [...prev, ...newImages]);
-    setStage('uploading');
-    setStageMessage(`${newImages.length} images uploaded ✓`);
+    setStage('describing');
+    setStageMessage(`${newImages.length} images uploaded - ab descriptions dein`);
+  };
+
+  const updateDescription = (id: string, description: string) => {
+    setImages(prev => prev.map(img => img.id === id ? { ...img, description } : img));
   };
 
   useEffect(() => {
@@ -140,16 +133,6 @@ export default function App() {
     }, 500);
     return () => clearTimeout(timer);
   }, [audioUrl]);
-
-  useEffect(() => {
-    if (audioFile && images.length > 0 && audioDuration > 0 && stage === 'uploading' && !processingRef.current) {
-      processingRef.current = true;
-      const timer = setTimeout(() => {
-        processAutomatically();
-      }, 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [audioFile, images.length, audioDuration, stage]);
 
   const calculateSimilarity = (a: string, b: string): number => {
     if (a === b) return 1;
@@ -241,30 +224,37 @@ export default function App() {
     const matched: SyncedImage[] = [];
     const skipped: ImageItem[] = [];
 
-    // Find matching images
+    // Analyze each image description against narration
     for (const img of images) {
+      if (!img.description.trim()) {
+        skipped.push(img);
+        continue;
+      }
+
+      const descWords = img.description.toLowerCase().split(/\s+/).filter(w => w.length > 2);
       let bestMatchTime: number | null = null;
       let bestScore = 0;
-      let matchedKeyword = '';
+      let matchedPhrase = '';
 
-      for (const keyword of img.keywords) {
+      // Check each word in description against transcript
+      for (const descWord of descWords) {
         for (let i = 0; i < words.length; i++) {
-          const score = calculateSimilarity(words[i], keyword);
+          const score = calculateSimilarity(words[i], descWord);
           if (score > 0.6 && score > bestScore) {
             bestScore = score;
             const timeRatio = i / words.length;
             bestMatchTime = timeRatio * audioDuration;
-            matchedKeyword = keyword;
+            matchedPhrase = descWord;
           }
         }
       }
 
-      if (bestMatchTime !== null) {
+      if (bestMatchTime !== null && bestScore > 0.6) {
         matched.push({
           image: img,
           startTime: bestMatchTime,
           duration: 0,
-          matchedKeyword,
+          matchedPhrase,
           effect: EFFECTS[Math.floor(Math.random() * EFFECTS.length)],
         });
       } else {
@@ -288,7 +278,21 @@ export default function App() {
     setSkippedImages(skipped);
   };
 
-  const processAutomatically = async () => {
+  const startSync = async () => {
+    if (!audioFile || images.length === 0) {
+      setStatusMsg('Pehle audio aur images upload karein!');
+      return;
+    }
+
+    const imagesWithDesc = images.filter(img => img.description.trim());
+    if (imagesWithDesc.length === 0) {
+      setStatusMsg('Kam az kam 1 image ki description dein!');
+      return;
+    }
+
+    if (processingRef.current) return;
+    processingRef.current = true;
+
     setStage('processing');
     setStageProgress(0);
     setStageMessage('Narration analyze ho rahi hai...');
@@ -299,13 +303,14 @@ export default function App() {
 
     setStageMessage('Images ko narration ke saath sync kar rahe hain...');
 
-    if (transcriptText && images.length > 0) {
+    if (transcriptText) {
       syncImagesToNarration(transcriptText);
     }
 
     await new Promise(r => setTimeout(r, 500));
     setStage('ready');
-    setStageMessage(`✓ ${syncedImages.length} images synced! ${skippedImages.length} skipped`);
+    setStageMessage(`✓ Sync complete!`);
+    processingRef.current = false;
   };
 
   const drawFrame = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, progress: number, effect: EffectType, width: number, height: number) => {
@@ -597,7 +602,7 @@ export default function App() {
               <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
                 VideoForge AI
               </h1>
-              <p className="text-xs text-gray-500">100% Narration-Synced Videos</p>
+              <p className="text-xs text-gray-500">Image Analysis + Narration Sync</p>
             </div>
           </div>
           {audioDuration > 0 && (
@@ -620,6 +625,7 @@ export default function App() {
       )}
 
       <main className="max-w-6xl mx-auto px-4 py-8 space-y-8">
+        {/* Upload Section */}
         <div className="grid md:grid-cols-2 gap-6">
           <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
             <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
@@ -661,19 +667,48 @@ export default function App() {
                 <p className="text-xs text-gray-500">Multiple select karein</p>
               </div>
             </label>
-            {images.length > 0 && (
-              <div className="grid grid-cols-5 gap-1.5 mt-4">
-                {images.map((img, idx) => (
-                  <div key={img.id} className="relative aspect-video rounded overflow-hidden border border-white/10">
-                    <img src={img.url} alt="" className="w-full h-full object-cover" />
-                    <span className="absolute bottom-0 left-0 text-[8px] bg-black/80 px-1 font-mono">#{idx+1}</span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         </div>
 
+        {/* Image Description Section */}
+        {images.length > 0 && (stage === 'describing' || stage === 'uploading') && (
+          <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
+            <h3 className="font-semibold mb-4 flex items-center gap-2">
+              <Edit3 className="w-5 h-5 text-yellow-400" />
+              Step 2: Har Image Ki Description Dein
+            </h3>
+            <p className="text-sm text-gray-400 mb-4">
+              Har image ke liye short description likhein (jaise "mountain landscape", "city at night", "ocean waves"). AI narration ke saath match karega.
+            </p>
+            <div className="space-y-3">
+              {images.map((img, idx) => (
+                <div key={img.id} className="flex items-start gap-3 bg-gray-800/40 rounded-xl p-3 border border-white/5">
+                  <span className="text-xs font-mono text-gray-500 pt-2">#{idx + 1}</span>
+                  <img src={img.url} alt="" className="w-20 h-14 object-cover rounded-lg" />
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      value={img.description}
+                      onChange={(e) => updateDescription(img.id, e.target.value)}
+                      placeholder="Is image mein kya hai? (e.g., mountain, sunset, city)"
+                      className="w-full bg-gray-700/50 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-purple-500"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={startSync}
+              disabled={!audioFile || images.filter(i => i.description.trim()).length === 0}
+              className="mt-6 w-full flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-lg shadow-purple-500/20"
+            >
+              <Brain className="w-5 h-5" />
+              Analyze & Sync with Narration
+            </button>
+          </div>
+        )}
+
+        {/* Processing */}
         {stage === 'processing' && (
           <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 rounded-2xl p-6 border border-purple-500/30">
             <div className="flex items-center gap-4">
@@ -691,6 +726,7 @@ export default function App() {
           </div>
         )}
 
+        {/* Ready - Results */}
         {stage === 'ready' && (
           <>
             <div className="grid md:grid-cols-2 gap-4">
@@ -723,9 +759,9 @@ export default function App() {
                     <div key={item.image.id} className="flex items-center gap-3 bg-gray-800/40 rounded-lg p-3 border border-white/5">
                       <img src={item.image.url} alt="" className="w-16 h-10 object-cover rounded" />
                       <div className="flex-1">
-                        <p className="text-sm text-gray-300">{item.image.name}</p>
+                        <p className="text-sm text-gray-300">{item.image.description}</p>
                         <p className="text-xs text-gray-500">
-                          "{item.matchedKeyword}" • {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)}
+                          Matched: "{item.matchedPhrase}" • {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)}
                         </p>
                       </div>
                       <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
@@ -831,9 +867,9 @@ export default function App() {
         {stage === 'idle' && (
           <div className="bg-white/5 rounded-2xl p-12 border border-white/10 text-center">
             <Brain className="w-16 h-16 mx-auto mb-4 text-purple-400/50" />
-            <h3 className="text-xl font-bold mb-2">100% Narration-Synced</h3>
-            <p className="text-gray-400 mb-6">Bas audio + images do, AI automatically relevant images ko narration ke saath sync karega</p>
-            <div className="grid sm:grid-cols-3 gap-4 max-w-2xl mx-auto">
+            <h3 className="text-xl font-bold mb-2">Image Analysis + Narration Sync</h3>
+            <p className="text-gray-400 mb-6">Images ko analyze karke narration ke saath perfectly sync karega</p>
+            <div className="grid sm:grid-cols-4 gap-4 max-w-3xl mx-auto">
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 font-bold mb-2">1</div>
                 <p className="text-sm font-medium">Upload</p>
@@ -841,11 +877,16 @@ export default function App() {
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-pink-500/20 flex items-center justify-center text-pink-400 font-bold mb-2">2</div>
+                <p className="text-sm font-medium">Describe</p>
+                <p className="text-xs text-gray-500 mt-1">Image content</p>
+              </div>
+              <div className="p-4 bg-gray-800/30 rounded-xl">
+                <div className="w-8 h-8 mx-auto rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-400 font-bold mb-2">3</div>
                 <p className="text-sm font-medium">AI Sync</p>
                 <p className="text-xs text-gray-500 mt-1">Auto-match</p>
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
-                <div className="w-8 h-8 mx-auto rounded-full bg-green-500/20 flex items-center justify-center text-green-400 font-bold mb-2">3</div>
+                <div className="w-8 h-8 mx-auto rounded-full bg-green-500/20 flex items-center justify-center text-green-400 font-bold mb-2">4</div>
                 <p className="text-sm font-medium">Export</p>
                 <p className="text-xs text-gray-500 mt-1">Perfect video</p>
               </div>
@@ -855,7 +896,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-white/10 mt-16 py-6">
-        <p className="text-center text-gray-600 text-sm">VideoForge AI — 100% Narration-Synced Videos</p>
+        <p className="text-center text-gray-600 text-sm">VideoForge AI — Image Analysis + Narration Sync</p>
       </footer>
     </div>
   );
