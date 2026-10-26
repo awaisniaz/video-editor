@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Image as ImageIcon, Music, Play, Pause, Download, Sparkles,
   Film, Clock, CheckCircle, AlertCircle, Loader, Zap, Brain,
-  Target, SkipForward, FileText, Mic
+  Target, SkipForward, FileText
 } from 'lucide-react';
 
 interface ImageItem {
@@ -19,8 +19,6 @@ interface SyncedImage {
   image: ImageItem;
   startTime: number;
   duration: number;
-  matchedPhrase: string;
-  confidence: number;
   effect: EffectType;
 }
 
@@ -28,7 +26,7 @@ type EffectType = 'kenburns' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right'
 
 const EFFECTS: EffectType[] = ['kenburns', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'fade'];
 
-type Stage = 'idle' | 'uploading' | 'prompts' | 'transcript' | 'processing' | 'ready';
+type Stage = 'idle' | 'uploading' | 'prompts' | 'ready';
 
 export default function App() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
@@ -36,9 +34,7 @@ export default function App() {
   const [audioDuration, setAudioDuration] = useState<number>(0);
   const [images, setImages] = useState<ImageItem[]>([]);
   const [promptsText, setPromptsText] = useState<string>('');
-  const [transcriptText, setTranscriptText] = useState<string>('');
   const [syncedImages, setSyncedImages] = useState<SyncedImage[]>([]);
-  const [skippedImages, setSkippedImages] = useState<ImageItem[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
@@ -47,7 +43,6 @@ export default function App() {
   const [resolution, setResolution] = useState<'720p' | '1080p'>('720p');
   const [statusMsg, setStatusMsg] = useState('');
   const [stage, setStage] = useState<Stage>('idle');
-  const [stageProgress, setStageProgress] = useState(0);
   const [stageMessage, setStageMessage] = useState('');
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -62,9 +57,7 @@ export default function App() {
       setAudioUrl(url);
       setVideoUrl('');
       setAudioDuration(0);
-      setTranscriptText('');
       setSyncedImages([]);
-      setSkippedImages([]);
       setStage('uploading');
       setStageMessage('Audio uploaded ✓');
     }
@@ -106,12 +99,18 @@ export default function App() {
     setStageMessage(`${newImages.length} images uploaded - ab prompts paste karein`);
   };
 
-  const parseAndAssignPrompts = () => {
+  const parseAndSync = () => {
     if (!promptsText.trim()) {
       setStatusMsg('Pehle prompts paste karein!');
       return;
     }
 
+    if (!audioDuration || audioDuration <= 0) {
+      setStatusMsg('Audio duration detect nahi hua. Dobara upload karein.');
+      return;
+    }
+
+    // Split prompts by empty lines
     const prompts = promptsText
       .split(/\n\s*\n/)
       .map(p => p.trim())
@@ -122,13 +121,29 @@ export default function App() {
       return;
     }
 
-    setImages(prev => prev.map((img, idx) => ({
+    // Assign prompts to images in order
+    const imagesWithPrompts = images.map((img, idx) => ({
       ...img,
       prompt: prompts[idx] || ''
-    })));
+    }));
 
-    setStage('transcript');
-    setStatusMsg(`✓ ${Math.min(prompts.length, images.length)} prompts assign ho gaye! Ab transcript paste karein`);
+    setImages(imagesWithPrompts);
+
+    // Sync images: divide audio duration equally among images
+    const durationPerImage = audioDuration / imagesWithPrompts.length;
+    const synced: SyncedImage[] = imagesWithPrompts
+      .filter(img => img.prompt.trim()) // Only images with prompts
+      .map((img, idx) => ({
+        image: img,
+        startTime: idx * durationPerImage,
+        duration: durationPerImage,
+        effect: EFFECTS[idx % EFFECTS.length],
+      }));
+
+    setSyncedImages(synced);
+    setStage('ready');
+    setStageMessage(`✓ ${synced.length} images synced! Har image ${durationPerImage.toFixed(1)}s ke liye dikhegi`);
+    setStatusMsg(`✓ ${synced.length} images narration ke saath sync ho gayi!`);
   };
 
   useEffect(() => {
@@ -144,7 +159,7 @@ export default function App() {
             setTimeout(() => {
               if (audioRef.current) {
                 const d = audioRef.current.duration;
-                if (d && isFinite(d)) setAudioDuration(dur);
+                if (d && isFinite(d)) setAudioDuration(d);
                 audioRef.current.currentTime = 0;
               }
             }, 100);
@@ -154,180 +169,6 @@ export default function App() {
     }, 500);
     return () => clearTimeout(timer);
   }, [audioUrl]);
-
-  const calculateSimilarity = (a: string, b: string): number => {
-    if (a === b) return 1;
-    if (a.includes(b) || b.includes(a)) return 0.8;
-    const longer = a.length > b.length ? a : b;
-    const shorter = a.length > b.length ? b : a;
-    if (longer.length === 0) return 1;
-    const editDistance = levenshtein(longer, shorter);
-    return (longer.length - editDistance) / longer.length;
-  };
-
-  const levenshtein = (a: string, b: string): number => {
-    const matrix: number[][] = [];
-    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
-    for (let i = 1; i <= b.length; i++) {
-      for (let j = 1; j <= a.length; j++) {
-        if (b.charAt(i - 1) === a.charAt(j - 1)) {
-          matrix[i][j] = matrix[i - 1][j - 1];
-        } else {
-          matrix[i][j] = Math.min(
-            matrix[i - 1][j - 1] + 1,
-            matrix[i][j - 1] + 1,
-            matrix[i - 1][j] + 1
-          );
-        }
-      }
-    }
-    return matrix[b.length][a.length];
-  };
-
-  const syncImagesToNarration = () => {
-    if (images.length === 0 || !audioDuration || !transcriptText.trim()) return;
-
-    const transcriptLower = transcriptText.toLowerCase();
-    const transcriptWords = transcriptLower.split(/\s+/).filter(w => w.length > 0);
-    
-    const matched: SyncedImage[] = [];
-    const skipped: ImageItem[] = [];
-
-    // Simple stop words - sirf basic
-    const stopWords = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or', 'but', 'with', 'by', 'from', 'as', 'it', 'its']);
-
-    for (const img of images) {
-      if (!img.prompt.trim()) {
-        skipped.push(img);
-        continue;
-      }
-
-      // Extract meaningful words from prompt
-      const promptWords = img.prompt
-        .toLowerCase()
-        .split(/[\s,.-]+/)
-        .filter(w => w.length > 3 && !stopWords.has(w));
-
-      if (promptWords.length === 0) {
-        skipped.push(img);
-        continue;
-      }
-
-      let bestMatchTime: number | null = null;
-      let bestScore = 0;
-      let matchedPhrase = '';
-      let matchCount = 0;
-
-      // Simple matching: check if any prompt word appears in transcript
-      for (const promptWord of promptWords) {
-        for (let i = 0; i < transcriptWords.length; i++) {
-          const transcriptWord = transcriptWords[i];
-          
-          // Direct match or contains
-          if (transcriptWord === promptWord || 
-              transcriptWord.includes(promptWord) || 
-              promptWord.includes(transcriptWord)) {
-            
-            matchCount++;
-            const timeRatio = i / transcriptWords.length;
-            const matchTime = timeRatio * audioDuration;
-            
-            // Take the first match (earliest time)
-            if (bestMatchTime === null) {
-              bestMatchTime = matchTime;
-              matchedPhrase = promptWord;
-              bestScore = 1;
-            }
-            break; // Found match for this word, move to next
-          }
-          
-          // Fuzzy match with lower threshold
-          const score = calculateSimilarity(transcriptWord, promptWord);
-          if (score > 0.7 && score > bestScore) {
-            bestScore = score;
-            const timeRatio = i / transcriptWords.length;
-            bestMatchTime = timeRatio * audioDuration;
-            matchedPhrase = promptWord;
-            matchCount++;
-          }
-        }
-      }
-
-      // If we found at least one match
-      if (bestMatchTime !== null && matchCount > 0) {
-        matched.push({
-          image: img,
-          startTime: bestMatchTime,
-          duration: 0,
-          matchedPhrase,
-          confidence: matchCount / promptWords.length,
-          effect: EFFECTS[Math.floor(Math.random() * EFFECTS.length)],
-        });
-      } else {
-        skipped.push(img);
-      }
-    }
-
-    // Sort by time
-    matched.sort((a, b) => a.startTime - b.startTime);
-
-    // Calculate durations
-    const finalSynced = matched.map((item, idx) => {
-      const nextStart = idx < matched.length - 1 ? matched[idx + 1].startTime : audioDuration;
-      return {
-        ...item,
-        duration: Math.max(0.5, nextStart - item.startTime),
-      };
-    });
-
-    // If no matches found, use fallback: equal distribution
-    if (finalSynced.length === 0) {
-      setStatusMsg('Koi match nahi mila. Equal distribution use ho rahi hai...');
-      const durationPerImage = audioDuration / images.length;
-      const fallbackSynced = images.map((img, idx) => ({
-        image: img,
-        startTime: idx * durationPerImage,
-        duration: durationPerImage,
-        matchedPhrase: 'equal-distribution',
-        confidence: 0,
-        effect: EFFECTS[idx % EFFECTS.length],
-      }));
-      setSyncedImages(fallbackSynced);
-      setSkippedImages([]);
-    } else {
-      setSyncedImages(finalSynced);
-      setSkippedImages(skipped);
-      setStatusMsg(`✓ ${finalSynced.length} images synced! ${skipped.length} skipped.`);
-    }
-  };
-
-  const startSync = () => {
-    if (!audioFile || images.length === 0) {
-      setStatusMsg('Pehle audio aur images upload karein!');
-      return;
-    }
-
-    const imagesWithPrompts = images.filter(img => img.prompt.trim());
-    if (imagesWithPrompts.length === 0) {
-      setStatusMsg('Pehle prompts assign karein!');
-      return;
-    }
-
-    if (!transcriptText.trim()) {
-      setStatusMsg('Pehle transcript paste karein!');
-      return;
-    }
-
-    setStage('processing');
-    setStageMessage('Images ko narration ke saath sync kar rahe hain...');
-
-    setTimeout(() => {
-      syncImagesToNarration();
-      setStage('ready');
-      setStageMessage(`✓ Sync complete!`);
-    }, 500);
-  };
 
   const drawFrame = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, progress: number, effect: EffectType, width: number, height: number) => {
     ctx.fillStyle = '#000';
@@ -616,7 +457,7 @@ export default function App() {
               <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
                 VideoForge AI
               </h1>
-              <p className="text-xs text-gray-500">Narration-Synced Video Creator</p>
+              <p className="text-xs text-gray-500">Simple: Audio + Images + Prompts = Video</p>
             </div>
           </div>
           {audioDuration > 0 && (
@@ -630,10 +471,10 @@ export default function App() {
 
       {statusMsg && (
         <div className="max-w-6xl mx-auto px-4 pt-4">
-          <div className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg px-4 py-2.5 text-yellow-300 text-sm">
-            <AlertCircle className="w-4 h-4" />
+          <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/30 rounded-lg px-4 py-2.5 text-green-300 text-sm">
+            <CheckCircle className="w-4 h-4" />
             <span>{statusMsg}</span>
-            <button onClick={() => setStatusMsg('')} className="ml-auto text-yellow-500 hover:text-yellow-300">×</button>
+            <button onClick={() => setStatusMsg('')} className="ml-auto text-green-500 hover:text-green-300">×</button>
           </div>
         </div>
       )}
@@ -653,7 +494,7 @@ export default function App() {
                 <div className="space-y-2">
                   <CheckCircle className="w-10 h-10 mx-auto text-green-400" />
                   <p className="text-green-300 font-medium text-sm">{audioFile.name}</p>
-                  <p className="text-xs text-gray-500">{(audioFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                  <p className="text-xs text-gray-500">{(audioFile.size / 1024 / 1024).toFixed(2)} MB • {formatTime(audioDuration)}</p>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -697,135 +538,66 @@ export default function App() {
           <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
             <h3 className="font-semibold mb-4 flex items-center gap-2">
               <FileText className="w-5 h-5 text-yellow-400" />
-              Step 3: Image Generation Prompts Paste Karein
-            </h3>
-            <p className="text-sm text-gray-400 mb-4">
-              Har prompt ke beech mein empty line dein
-            </p>
-            <textarea
-              value={promptsText}
-              onChange={(e) => setPromptsText(e.target.value)}
-              placeholder={`Prompt 1\n\nPrompt 2\n\nPrompt 3`}
-              className="w-full h-48 bg-gray-800/50 border border-gray-700 rounded-xl p-4 text-sm text-gray-300 focus:outline-none focus:border-purple-500 resize-none font-mono"
-            />
-            <button
-              onClick={parseAndAssignPrompts}
-              disabled={!promptsText.trim()}
-              className="mt-4 flex items-center gap-2 px-5 py-2.5 bg-purple-500/20 border border-purple-500/50 rounded-lg text-purple-300 hover:bg-purple-500/30 transition-all disabled:opacity-30"
-            >
-              <CheckCircle className="w-4 h-4" />
-              Assign Prompts
-            </button>
-          </div>
-        )}
-
-        {stage === 'transcript' && (
-          <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
-            <h3 className="font-semibold mb-4 flex items-center gap-2">
-              <Mic className="w-5 h-5 text-green-400" />
-              Step 4: Narration Transcript Paste Karein
+              Step 3: Image Prompts Paste Karein
             </h3>
             <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-4">
               <p className="text-sm text-blue-300 mb-2">
-                <strong>Important:</strong> Apni audio ka transcript yahan paste karein.
+                <strong>Important:</strong> Har prompt ke beech mein <strong>empty line</strong> dein. Images ko order mein sync kiya jayega.
               </p>
               <p className="text-xs text-gray-400">
-                Kisi bhi speech-to-text tool se transcript generate karein: Google Docs (Tools → Voice typing), Otter.ai, ya koi bhi tool.
+                Example: Pehla prompt = pehli image, doosra prompt = doosri image, etc.
               </p>
             </div>
-            
-            {/* Example */}
-            <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4 mb-4">
-              <p className="text-xs text-gray-400 mb-2 font-semibold">Example (agar aapki images mountains, city, ocean ki hain):</p>
-              <p className="text-xs text-gray-500 italic">
-                "We started our journey in the beautiful mountains, then we drove through the busy city streets, and finally we reached the peaceful ocean beach..."
-              </p>
-            </div>
-            
             <textarea
-              value={transcriptText}
-              onChange={(e) => setTranscriptText(e.target.value)}
-              placeholder="Apni audio ki transcript yahan paste karein..."
-              className="w-full h-48 bg-gray-800/50 border border-gray-700 rounded-xl p-4 text-sm text-gray-300 focus:outline-none focus:border-purple-500 resize-none"
+              value={promptsText}
+              onChange={(e) => setPromptsText(e.target.value)}
+              placeholder={`Prompt 1 (pehli image ke liye)\n\nPrompt 2 (doosri image ke liye)\n\nPrompt 3 (teesri image ke liye)`}
+              className="w-full h-64 bg-gray-800/50 border border-gray-700 rounded-xl p-4 text-sm text-gray-300 focus:outline-none focus:border-purple-500 resize-none font-mono"
             />
             <button
-              onClick={startSync}
-              disabled={!transcriptText.trim()}
+              onClick={parseAndSync}
+              disabled={!promptsText.trim() || !audioDuration}
               className="mt-4 flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              <Brain className="w-5 h-5" />
-              Analyze & Sync with Narration
+              <Zap className="w-5 h-5" />
+              Sync & Create Video
             </button>
           </div>
         )}
 
-        {stage === 'processing' && (
-          <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 rounded-2xl p-6 border border-purple-500/30">
-            <div className="flex items-center gap-4">
-              <Loader className="w-8 h-8 animate-spin text-purple-400" />
-              <div className="flex-1">
-                <p className="text-purple-300 font-medium">{stageMessage}</p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {stage === 'ready' && (
+        {stage === 'ready' && syncedImages.length > 0 && (
           <>
-            <div className="grid md:grid-cols-2 gap-4">
-              <div className="bg-green-500/10 rounded-xl p-4 border border-green-500/30">
-                <div className="flex items-center gap-2 mb-2">
-                  <Target className="w-5 h-5 text-green-400" />
-                  <h3 className="font-semibold text-green-300">Synced ({syncedImages.length})</h3>
-                </div>
-                <p className="text-xs text-gray-400">Narration ke saath perfectly sync hain</p>
+            <div className="bg-green-500/10 rounded-xl p-4 border border-green-500/30">
+              <div className="flex items-center gap-2 mb-2">
+                <Target className="w-5 h-5 text-green-400" />
+                <h3 className="font-semibold text-green-300">✓ {syncedImages.length} Images Synced!</h3>
               </div>
-              {skippedImages.length > 0 && (
-                <div className="bg-orange-500/10 rounded-xl p-4 border border-orange-500/30">
-                  <div className="flex items-center gap-2 mb-2">
-                    <SkipForward className="w-5 h-5 text-orange-400" />
-                    <h3 className="font-semibold text-orange-300">Skipped ({skippedImages.length})</h3>
-                  </div>
-                  <p className="text-xs text-gray-400">Narration se match nahi hui</p>
-                </div>
-              )}
+              <p className="text-xs text-gray-400">
+                Har image {syncedImages[0]?.duration.toFixed(1)}s ke liye dikhegi • Total: {formatTime(audioDuration)}
+              </p>
             </div>
 
-            {syncedImages.length > 0 && (
-              <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
-                <h3 className="font-semibold mb-4 flex items-center gap-2">
-                  <Zap className="w-5 h-5 text-yellow-400" />
-                  Synced Timeline
-                </h3>
-                <div className="space-y-2">
-                  {syncedImages.map((item, idx) => (
-                    <div key={item.image.id} className="flex items-center gap-3 bg-gray-800/40 rounded-lg p-3 border border-white/5">
-                      <img src={item.image.url} alt="" className="w-16 h-10 object-cover rounded" />
-                      <div className="flex-1">
-                        <p className="text-sm text-gray-300 line-clamp-1">{item.image.prompt}</p>
-                        <p className="text-xs text-gray-500">
-                          Matched: "<span className="text-green-400">{item.matchedPhrase}</span>" • 
-                          Time: {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)} • 
-                          Confidence: {Math.round(item.confidence * 100)}%
-                        </p>
-                      </div>
-                      <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
+            <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <Zap className="w-5 h-5 text-yellow-400" />
+                Timeline
+              </h3>
+              <div className="space-y-2">
+                {syncedImages.map((item, idx) => (
+                  <div key={item.image.id} className="flex items-center gap-3 bg-gray-800/40 rounded-lg p-3 border border-white/5">
+                    <span className="text-xs font-mono text-gray-500 w-6">#{idx+1}</span>
+                    <img src={item.image.url} alt="" className="w-16 h-10 object-cover rounded" />
+                    <div className="flex-1">
+                      <p className="text-sm text-gray-300 line-clamp-2">{item.image.prompt}</p>
+                      <p className="text-xs text-gray-500">
+                        {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)} • {item.duration.toFixed(1)}s
+                      </p>
                     </div>
-                  ))}
-                </div>
-                
-                {/* Debug Info */}
-                <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-                  <p className="text-xs text-blue-300 mb-2 font-semibold">Debug Info:</p>
-                  <p className="text-xs text-gray-400">
-                    Total Images: {images.length} | Synced: {syncedImages.length} | Skipped: {skippedImages.length} | Audio Duration: {formatTime(audioDuration)}
-                  </p>
-                  <p className="text-xs text-gray-400 mt-1">
-                    Transcript Words: {transcriptText.split(/\s+/).filter(w => w.length > 0).length}
-                  </p>
-                </div>
+                    <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
+                  </div>
+                ))}
               </div>
-            )}
+            </div>
 
             <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
@@ -888,7 +660,7 @@ export default function App() {
                 </div>
               ) : videoUrl ? (
                 <div className="space-y-4">
-                  <a href={videoUrl} download="videoforge-synced.webm" className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all shadow-lg shadow-purple-500/20">
+                  <a href={videoUrl} download="videoforge-video.webm" className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all shadow-lg shadow-purple-500/20">
                     <Download className="w-5 h-5" />
                     Download Video
                   </a>
@@ -912,7 +684,7 @@ export default function App() {
                     className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:opacity-90 transition-all shadow-lg shadow-purple-500/20"
                   >
                     <Film className="w-5 h-5" />
-                    Generate Synced Video
+                    Generate Video
                   </button>
                 </div>
               )}
@@ -923,9 +695,9 @@ export default function App() {
         {stage === 'idle' && (
           <div className="bg-white/5 rounded-2xl p-12 border border-white/10 text-center">
             <Brain className="w-16 h-16 mx-auto mb-4 text-purple-400/50" />
-            <h3 className="text-xl font-bold mb-2">Narration-Synced Video Creator</h3>
-            <p className="text-gray-400 mb-6">Images ko narration ke saath perfectly sync karein</p>
-            <div className="grid sm:grid-cols-4 gap-4 max-w-3xl mx-auto">
+            <h3 className="text-xl font-bold mb-2">Simple 3 Steps</h3>
+            <p className="text-gray-400 mb-6">Bas audio, images, aur prompts dein - video ban jayegi</p>
+            <div className="grid sm:grid-cols-3 gap-4 max-w-2xl mx-auto">
               <div className="p-4 bg-gray-800/30 rounded-xl">
                 <div className="w-8 h-8 mx-auto rounded-full bg-purple-500/20 flex items-center justify-center text-purple-400 font-bold mb-2">1</div>
                 <p className="text-sm font-medium">Upload</p>
@@ -937,14 +709,9 @@ export default function App() {
                 <p className="text-xs text-gray-500 mt-1">Paste prompts</p>
               </div>
               <div className="p-4 bg-gray-800/30 rounded-xl">
-                <div className="w-8 h-8 mx-auto rounded-full bg-yellow-500/20 flex items-center justify-center text-yellow-400 font-bold mb-2">3</div>
-                <p className="text-sm font-medium">Transcript</p>
-                <p className="text-xs text-gray-500 mt-1">Paste transcript</p>
-              </div>
-              <div className="p-4 bg-gray-800/30 rounded-xl">
-                <div className="w-8 h-8 mx-auto rounded-full bg-green-500/20 flex items-center justify-center text-green-400 font-bold mb-2">4</div>
-                <p className="text-sm font-medium">Export</p>
-                <p className="text-xs text-gray-500 mt-1">Perfect video</p>
+                <div className="w-8 h-8 mx-auto rounded-full bg-green-500/20 flex items-center justify-center text-green-400 font-bold mb-2">3</div>
+                <p className="text-sm font-medium">Done!</p>
+                <p className="text-xs text-gray-500 mt-1">Video ready</p>
               </div>
             </div>
           </div>
@@ -952,7 +719,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-white/10 mt-16 py-6">
-        <p className="text-center text-gray-600 text-sm">VideoForge AI — Narration-Synced Video Creator</p>
+        <p className="text-center text-gray-600 text-sm">VideoForge AI — Simple & Fast Video Creation</p>
       </footer>
     </div>
   );
