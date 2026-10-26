@@ -44,9 +44,9 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState('');
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Audio element always rendered (hidden) so ref is never null
   const audioRef = useRef<HTMLAudioElement>(null);
   const animFrameRef = useRef<number>(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const getRes = useCallback(() => {
     return resolution === '1080p' ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
@@ -59,6 +59,7 @@ export default function App() {
       const url = URL.createObjectURL(file);
       setAudioUrl(url);
       setVideoUrl('');
+      setAudioDuration(0);
     }
   };
 
@@ -68,7 +69,7 @@ export default function App() {
       const img = new window.Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => resolve({ img, url });
-      img.onerror = () => resolve({ img, url }); // still add even if error
+      img.onerror = () => resolve({ img, url });
       img.src = url;
     });
   };
@@ -78,7 +79,7 @@ export default function App() {
     if (!files) return;
 
     const fileArray = Array.from(files).filter(f => f.type.startsWith('image/'));
-    
+
     for (const file of fileArray) {
       const { img, url } = await loadImage(file);
       setImages(prev => {
@@ -92,7 +93,6 @@ export default function App() {
           img,
           loaded: true,
         }];
-        // Recalculate durations
         if (audioDuration > 0) {
           const dur = audioDuration / newImages.length;
           return newImages.map(i => ({ ...i, duration: dur }));
@@ -136,7 +136,6 @@ export default function App() {
 
     if (!img || !img.naturalWidth) return;
 
-    // Calculate image dimensions to cover canvas
     const imgAspect = img.naturalWidth / img.naturalHeight;
     const canvasAspect = width / height;
     let drawWidth: number, drawHeight: number;
@@ -195,7 +194,6 @@ export default function App() {
     ctx.drawImage(img, x, y, drawWidth, drawHeight);
     ctx.restore();
 
-    // Subtle vignette
     const gradient = ctx.createRadialGradient(
       width / 2, height / 2, height * 0.35,
       width / 2, height / 2, height * 0.85
@@ -208,7 +206,7 @@ export default function App() {
 
   const getCurrentImageAtTime = (time: number): { img: ImageItem; progress: number } | null => {
     if (images.length === 0) return null;
-    
+
     let accumulated = 0;
     for (let i = 0; i < images.length; i++) {
       const imgItem = images[i];
@@ -224,11 +222,11 @@ export default function App() {
   const renderCurrentFrame = useCallback((time: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
+
     const { width, height } = getRes();
     canvas.width = width;
     canvas.height = height;
-    
+
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
@@ -238,36 +236,44 @@ export default function App() {
     } else {
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, width, height);
-      ctx.fillStyle = '#666';
-      ctx.font = '24px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('Loading...', width / 2, height / 2);
     }
   }, [images, getRes]);
 
   const startPreview = () => {
-    if (!audioRef.current || images.length === 0 || !audioDuration) {
-      setStatusMsg('Please upload audio and images first!');
+    const audio = audioRef.current;
+    if (!audio) {
+      setStatusMsg('Audio element not ready, please wait...');
+      return;
+    }
+    if (!audioFile) {
+      setStatusMsg('Please upload audio first!');
+      return;
+    }
+    if (images.length === 0) {
+      setStatusMsg('Please upload images first!');
+      return;
+    }
+    if (!audioDuration || audioDuration <= 0) {
+      setStatusMsg('Audio duration not detected yet. Try playing audio once from Upload tab.');
       return;
     }
 
-    // Stop any existing preview
     cancelAnimationFrame(animFrameRef.current);
 
-    const audio = audioRef.current;
     audio.currentTime = 0;
-    
+    audio.volume = 1;
+
     const playPromise = audio.play();
     if (playPromise) {
       playPromise.then(() => {
         setIsPlaying(true);
-        
+
         const animate = () => {
           const time = audio.currentTime;
           setCurrentTime(time);
           renderCurrentFrame(time);
 
-          if (time >= audioDuration - 0.05) {
+          if (time >= audioDuration - 0.05 || audio.ended) {
             setIsPlaying(false);
             return;
           }
@@ -276,7 +282,7 @@ export default function App() {
         animate();
       }).catch(err => {
         console.error('Audio play failed:', err);
-        setStatusMsg('Audio play failed. Try clicking again.');
+        setStatusMsg('Audio play failed: ' + err.message + '. Click again.');
       });
     }
   };
@@ -293,15 +299,23 @@ export default function App() {
   };
 
   const exportVideo = async () => {
-    if (!audioFile || images.length === 0 || !audioDuration) {
-      setStatusMsg('Upload audio and images first!');
+    const audio = audioRef.current;
+    if (!audioFile) {
+      setStatusMsg('Upload audio first!');
+      return;
+    }
+    if (images.length === 0) {
+      setStatusMsg('Upload images first!');
+      return;
+    }
+    if (!audioDuration || audioDuration <= 0) {
+      setStatusMsg('Audio duration not detected. Play audio once from Upload tab first.');
       return;
     }
 
-    // Check all images loaded
     const allLoaded = images.every(img => img.loaded && img.img.naturalWidth > 0);
     if (!allLoaded) {
-      setStatusMsg('Images are still loading, please wait...');
+      setStatusMsg('Images still loading, please wait...');
       return;
     }
 
@@ -321,7 +335,7 @@ export default function App() {
 
     // Setup audio context
     const audioContext = new AudioContext();
-    await audioContext.resume(); // Important for browser autoplay policy
+    await audioContext.resume();
 
     const arrayBuffer = await audioFile.arrayBuffer();
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -331,18 +345,14 @@ export default function App() {
 
     const dest = audioContext.createMediaStreamDestination();
     source.connect(dest);
-    source.connect(audioContext.destination); // Also play through speakers
 
-    // Get canvas stream
     const canvasStream = canvas.captureStream(30);
-    
-    // Combine video + audio tracks
+
     const combinedStream = new MediaStream([
       ...canvasStream.getVideoTracks(),
       ...dest.stream.getAudioTracks()
     ]);
 
-    // Determine supported mime type
     let mimeType = 'video/webm;codecs=vp9,opus';
     if (!MediaRecorder.isTypeSupported(mimeType)) {
       mimeType = 'video/webm;codecs=vp8,opus';
@@ -372,34 +382,27 @@ export default function App() {
       };
     });
 
-    recorder.start(100); // Collect data every 100ms
+    recorder.start(100);
     source.start(0);
 
     const totalMs = audioDuration * 1000;
     const startMs = performance.now();
-
-    // Use setInterval for consistent frame rendering
-    const fps = 30;
-    const frameInterval = 1000 / fps;
+    const frameInterval = 1000 / 30;
 
     const renderInterval = setInterval(() => {
       const elapsed = performance.now() - startMs;
       const timeSec = elapsed / 1000;
       const progress = Math.min(elapsed / totalMs, 1);
-      
+
       setExportProgress(Math.round(progress * 100));
 
       if (progress >= 1) {
         clearInterval(renderInterval);
-        // Draw final frame
         renderCurrentFrame(audioDuration);
-        
-        // Stop everything
+
         setTimeout(() => {
-          try {
-            source.stop();
-          } catch(e) {}
-          recorder.stop();
+          try { source.stop(); } catch (e) { }
+          try { if (recorder.state !== 'inactive') recorder.stop(); } catch (e) { }
           canvasStream.getTracks().forEach(t => t.stop());
           audioContext.close();
         }, 200);
@@ -412,34 +415,53 @@ export default function App() {
     // Safety timeout
     setTimeout(() => {
       clearInterval(renderInterval);
-      try {
-        source.stop();
-      } catch(e) {}
-      try {
-        if (recorder.state !== 'inactive') recorder.stop();
-      } catch(e) {}
+      try { source.stop(); } catch (e) { }
+      try { if (recorder.state !== 'inactive') recorder.stop(); } catch (e) { }
       canvasStream.getTracks().forEach(t => t.stop());
       audioContext.close();
       setIsExporting(false);
-    }, totalMs + 3000);
+    }, totalMs + 5000);
 
     await exportDone;
   };
 
   const formatTime = (seconds: number) => {
+    if (!seconds || !isFinite(seconds)) return '0:00';
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const handleAudioLoaded = () => {
-    if (audioRef.current) {
-      const dur = audioRef.current.duration;
-      if (dur && isFinite(dur)) {
-        setAudioDuration(dur);
+  // Force duration detection with fallback
+  useEffect(() => {
+    if (!audioUrl) return;
+    
+    // Wait a bit for metadata to load, then try to get duration
+    const timer1 = setTimeout(() => {
+      if (audioRef.current && (!audioDuration || audioDuration <= 0)) {
+        const dur = audioRef.current.duration;
+        if (dur && isFinite(dur)) {
+          setAudioDuration(dur);
+        } else {
+          // Fallback: seek to force duration calculation
+          if (audioRef.current) {
+            audioRef.current.currentTime = 1e101;
+            setTimeout(() => {
+              if (audioRef.current) {
+                const d = audioRef.current.duration;
+                if (d && isFinite(d)) {
+                  setAudioDuration(d);
+                }
+                audioRef.current.currentTime = 0;
+              }
+            }, 100);
+          }
+        }
       }
-    }
-  };
+    }, 500);
+
+    return () => clearTimeout(timer1);
+  }, [audioUrl]);
 
   // Draw initial frame when images change
   useEffect(() => {
@@ -452,6 +474,31 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-purple-950/30 to-gray-900 text-white">
+      {/* HIDDEN audio element — always in DOM so ref is always available */}
+      {audioUrl && (
+        <audio
+          ref={audioRef}
+          src={audioUrl}
+          onLoadedMetadata={(e) => {
+            const dur = (e.target as HTMLAudioElement).duration;
+            if (dur && isFinite(dur)) {
+              setAudioDuration(dur);
+            }
+          }}
+          onCanPlay={() => {
+            // Fallback: also set duration here in case onLoadedMetadata didn't fire
+            if (audioRef.current && (!audioDuration || audioDuration <= 0)) {
+              const dur = audioRef.current.duration;
+              if (dur && isFinite(dur)) {
+                setAudioDuration(dur);
+              }
+            }
+          }}
+          className="hidden"
+          preload="metadata"
+        />
+      )}
+
       {/* Header */}
       <header className="border-b border-white/10 backdrop-blur-xl bg-black/30 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
@@ -488,11 +535,10 @@ export default function App() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-all ${
-                  activeTab === tab.id
+                className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-all ${activeTab === tab.id
                     ? 'border-purple-500 text-purple-400 bg-purple-500/5'
                     : 'border-transparent text-gray-500 hover:text-gray-300'
-                }`}
+                  }`}
               >
                 <tab.icon className="w-4 h-4" />
                 <span className="hidden sm:inline">{tab.label}</span>
@@ -505,10 +551,10 @@ export default function App() {
       {/* Status message */}
       {statusMsg && (
         <div className="max-w-7xl mx-auto px-4 pt-4">
-          <div className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg px-4 py-2 text-yellow-300 text-sm">
-            <AlertCircle className="w-4 h-4" />
-            {statusMsg}
-            <button onClick={() => setStatusMsg('')} className="ml-auto text-yellow-500 hover:text-yellow-300">×</button>
+          <div className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg px-4 py-2.5 text-yellow-300 text-sm">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            <span>{statusMsg}</span>
+            <button onClick={() => setStatusMsg('')} className="ml-auto text-yellow-500 hover:text-yellow-300 text-lg leading-none">×</button>
           </div>
         </div>
       )}
@@ -529,11 +575,14 @@ export default function App() {
                 <input type="file" accept="audio/*" onChange={handleAudioUpload} className="hidden" />
                 {audioFile ? (
                   <div className="space-y-3">
-                    <div className="w-16 h-16 mx-auto rounded-full bg-purple-500/20 flex items-center justify-center">
-                      <CheckCircle className="w-8 h-8 text-purple-400" />
+                    <div className="w-16 h-16 mx-auto rounded-full bg-green-500/20 flex items-center justify-center">
+                      <CheckCircle className="w-8 h-8 text-green-400" />
                     </div>
-                    <p className="text-purple-300 font-medium">{audioFile.name}</p>
+                    <p className="text-green-300 font-medium">{audioFile.name}</p>
                     <p className="text-sm text-gray-500">{(audioFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                    {audioDuration > 0 && (
+                      <p className="text-sm text-purple-400">Duration: {formatTime(audioDuration)}</p>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -545,9 +594,24 @@ export default function App() {
                   </div>
                 )}
               </label>
+
+              {/* Audio info in upload tab */}
               {audioUrl && (
-                <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-                  <audio ref={audioRef} src={audioUrl} onLoadedMetadata={handleAudioLoaded} controls className="w-full" />
+                <div className="bg-white/5 rounded-xl p-4 border border-white/10 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-400">Status:</span>
+                    {audioDuration > 0 ? (
+                      <span className="text-sm text-green-400 flex items-center gap-1">
+                        <CheckCircle className="w-4 h-4" />
+                        Duration detected: {formatTime(audioDuration)}
+                      </span>
+                    ) : (
+                      <span className="text-sm text-yellow-400 flex items-center gap-1">
+                        <Loader className="w-4 h-4 animate-spin" />
+                        Detecting duration...
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -635,11 +699,10 @@ export default function App() {
                   <button
                     key={effect.id}
                     onClick={() => applyEffectToAll(effect.id)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                      selectedEffect === effect.id
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${selectedEffect === effect.id
                         ? 'bg-purple-500/30 border border-purple-500 text-purple-300 shadow-lg shadow-purple-500/10'
                         : 'bg-gray-800/80 border border-gray-700 text-gray-400 hover:text-white hover:border-gray-500'
-                    }`}
+                      }`}
                   >
                     {effect.name}
                   </button>
@@ -703,11 +766,10 @@ export default function App() {
                     <button
                       key={res}
                       onClick={() => setResolution(res)}
-                      className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                        resolution === res
+                      className={`px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${resolution === res
                           ? 'bg-purple-500/30 border border-purple-500 text-purple-300'
                           : 'bg-gray-800 border border-gray-700 text-gray-400 hover:text-white'
-                      }`}
+                        }`}
                     >
                       {res === '720p' ? 'HD 720p' : 'Full HD 1080p'}
                     </button>
@@ -739,9 +801,18 @@ export default function App() {
               )}
               {!readyForVideo && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-                  <div className="text-center">
+                  <div className="text-center px-4">
                     <Film className="w-12 h-12 mx-auto mb-3 text-gray-600" />
-                    <p className="text-gray-400">Upload audio & images to preview</p>
+                    <p className="text-gray-400 mb-2">
+                      {!audioFile ? 'Step 1: Upload audio' : images.length === 0 ? 'Step 2: Upload images' : 'Audio duration not detected'}
+                    </p>
+                    <p className="text-gray-600 text-sm">
+                      {!audioFile
+                        ? 'Go to Upload tab and add your voiceover'
+                        : images.length === 0
+                          ? 'Go to Upload tab and add images'
+                          : 'Play the audio once from Upload tab to detect duration'}
+                    </p>
                   </div>
                 </div>
               )}
@@ -784,7 +855,7 @@ export default function App() {
                   <Download className="w-10 h-10 text-purple-400" />
                 )}
               </div>
-              
+
               <h3 className="text-2xl font-bold mb-2">
                 {isExporting ? 'Exporting Video...' : videoUrl ? 'Video Ready!' : 'Export Video'}
               </h3>
@@ -827,9 +898,16 @@ export default function App() {
                   Generate Video
                 </button>
               )}
+
+              {!readyForVideo && !isExporting && !videoUrl && (
+                <div className="mt-6 text-sm text-gray-500">
+                  {!audioFile && <p>⚠ Upload audio first</p>}
+                  {audioFile && images.length === 0 && <p>⚠ Upload images first</p>}
+                  {audioFile && images.length > 0 && !audioDuration && <p>⚠ Play audio once from Upload tab to detect duration</p>}
+                </div>
+              )}
             </div>
 
-            {/* How it works */}
             <div className="bg-white/5 rounded-xl p-6 border border-white/10">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-yellow-400" />
