@@ -129,21 +129,41 @@ export default function App() {
 
     setImages(imagesWithPrompts);
 
-    // Sync images: divide audio duration equally among images
-    const durationPerImage = audioDuration / imagesWithPrompts.length;
-    const synced: SyncedImage[] = imagesWithPrompts
-      .filter(img => img.prompt.trim()) // Only images with prompts
-      .map((img, idx) => ({
+    // Calculate word count for each prompt to determine duration
+    const imagesWithWordCount = imagesWithPrompts
+      .filter(img => img.prompt.trim())
+      .map(img => ({
         image: img,
-        startTime: idx * durationPerImage,
-        duration: durationPerImage,
-        effect: EFFECTS[idx % EFFECTS.length],
+        wordCount: img.prompt.split(/\s+/).filter(w => w.length > 0).length
       }));
+
+    // Calculate total words
+    const totalWords = imagesWithWordCount.reduce((sum, item) => sum + item.wordCount, 0);
+
+    // Calculate duration for each image based on word count ratio
+    let currentTime = 0;
+    const synced: SyncedImage[] = imagesWithWordCount.map((item, idx) => {
+      // Duration proportional to word count
+      const durationRatio = item.wordCount / totalWords;
+      const duration = durationRatio * audioDuration;
+      
+      const syncedImage: SyncedImage = {
+        image: item.image,
+        startTime: currentTime,
+        duration: duration,
+        effect: EFFECTS[idx % EFFECTS.length],
+      };
+      
+      currentTime += duration;
+      return syncedImage;
+    });
 
     setSyncedImages(synced);
     setStage('ready');
-    setStageMessage(`✓ ${synced.length} images synced! Har image ${durationPerImage.toFixed(1)}s ke liye dikhegi`);
-    setStatusMsg(`✓ ${synced.length} images narration ke saath sync ho gayi!`);
+    
+    const avgDuration = audioDuration / synced.length;
+    setStageMessage(`✓ ${synced.length} images synced! Duration word count ke hisab se set hui`);
+    setStatusMsg(`✓ ${synced.length} images narration ke saath sync ho gayi! Zyada detail = zyada time`);
   };
 
   useEffect(() => {
@@ -573,29 +593,60 @@ export default function App() {
                 <h3 className="font-semibold text-green-300">✓ {syncedImages.length} Images Synced!</h3>
               </div>
               <p className="text-xs text-gray-400">
-                Har image {syncedImages[0]?.duration.toFixed(1)}s ke liye dikhegi • Total: {formatTime(audioDuration)}
+                Duration prompt detail ke hisab se set hui • Total: {formatTime(audioDuration)}
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                📊 Zyada words = Zyada time | Kam words = Kam time
               </p>
             </div>
 
             <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
               <h3 className="font-semibold mb-4 flex items-center gap-2">
                 <Zap className="w-5 h-5 text-yellow-400" />
-                Timeline
+                Timeline (Duration = Prompt Detail ke Hisab Se)
               </h3>
               <div className="space-y-2">
-                {syncedImages.map((item, idx) => (
-                  <div key={item.image.id} className="flex items-center gap-3 bg-gray-800/40 rounded-lg p-3 border border-white/5">
-                    <span className="text-xs font-mono text-gray-500 w-6">#{idx+1}</span>
-                    <img src={item.image.url} alt="" className="w-16 h-10 object-cover rounded" />
-                    <div className="flex-1">
-                      <p className="text-sm text-gray-300 line-clamp-2">{item.image.prompt}</p>
-                      <p className="text-xs text-gray-500">
-                        {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)} • {item.duration.toFixed(1)}s
-                      </p>
+                {syncedImages.map((item, idx) => {
+                  const wordCount = item.image.prompt.split(/\s+/).filter(w => w.length > 0).length;
+                  const durationPercent = (item.duration / audioDuration) * 100;
+                  return (
+                    <div key={item.image.id} className="bg-gray-800/40 rounded-lg p-3 border border-white/5">
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs font-mono text-gray-500 w-6">#{idx+1}</span>
+                        <img src={item.image.url} alt="" className="w-16 h-10 object-cover rounded" />
+                        <div className="flex-1">
+                          <p className="text-sm text-gray-300 line-clamp-2">{item.image.prompt}</p>
+                          <div className="flex items-center gap-3 mt-1 text-xs">
+                            <span className="text-gray-500">
+                              ⏱ {formatTime(item.startTime)} → {formatTime(item.startTime + item.duration)}
+                            </span>
+                            <span className="text-green-400 font-semibold">
+                              {item.duration.toFixed(1)}s
+                            </span>
+                            <span className="text-gray-500">
+                              ({wordCount} words • {durationPercent.toFixed(0)}% time)
+                            </span>
+                          </div>
+                        </div>
+                        <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
+                      </div>
+                      {/* Visual duration bar */}
+                      <div className="mt-2 ml-9">
+                        <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full"
+                            style={{ width: `${durationPercent}%` }}
+                          />
+                        </div>
+                      </div>
                     </div>
-                    <span className="text-xs px-2 py-1 bg-purple-500/20 text-purple-300 rounded">{item.effect}</span>
-                  </div>
-                ))}
+                  );
+                })}
+              </div>
+              <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                <p className="text-xs text-blue-300">
+                  💡 <strong>Logic:</strong> Jis prompt mein zyada words hain (zyada detail), us image ko zyada time milega. Jis mein kam words hain, usko kam time.
+                </p>
               </div>
             </div>
 
