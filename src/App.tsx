@@ -195,7 +195,7 @@ function findSpeechParts(buffer: AudioBuffer, minSilenceSec: number): SpeechPart
   let peak = 0;
   for (const value of rms) if (value > peak) peak = value;
   if (peak < 0.001) return [];
-  const threshold = Math.max(0.006, peak * 0.12);
+  const threshold = Math.max(0.004, peak * 0.07);
   const minSilenceWindows = Math.max(1, Math.round(minSilenceSec / 0.02));
   const minSpeechWindows = Math.max(1, Math.round(0.25 / 0.02));
   const voiced = rms.map((value) => value >= threshold);
@@ -226,12 +226,12 @@ function findSpeechParts(buffer: AudioBuffer, minSilenceSec: number): SpeechPart
     }
   }
 
-  const tail = 0.22;
+  const tail = 0.45;
   return parts.map((part, index) => {
     const nextStart = parts[index + 1]?.start ?? buffer.duration;
     return {
       start: part.start,
-      end: Math.max(part.end, Math.min(part.end + tail, nextStart - 0.04, buffer.duration)),
+      end: Math.max(part.end, Math.min(part.end + tail, nextStart - 0.02, buffer.duration)),
     };
   });
 }
@@ -918,10 +918,11 @@ export default function App() {
     if (result && result.img.image.loaded) {
       const clipIndex = clips.indexOf(result.img);
       const intoClip = time - result.img.startTime;
-      const fadeFor = Math.min(0.12, result.img.duration * 0.2);
+      const fadeFor = Math.min(0.45, result.img.duration * 0.35);
       const previous = clipIndex > 0 ? clips[clipIndex - 1] : null;
       if (previous && previous.image.loaded && intoClip >= 0 && intoClip < fadeFor) {
-        const mix = intoClip / fadeFor;
+        const linear = intoClip / fadeFor;
+        const mix = linear * linear * (3 - 2 * linear);
         drawFrame(ctx, previous.image.img, 1, previous.effect, width, height, time, fitMode, { opacity: 1 - mix, clear: true, captions: false });
         drawFrame(ctx, result.img.image.img, result.progress, result.img.effect, width, height, time, fitMode, { opacity: mix, clear: false, captions: false });
         if (captions.length > 0) drawCaptions(ctx, time, width, height);
