@@ -2,17 +2,6 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
-import {
-  AudioBufferSource,
-  BufferTarget,
-  Mp4OutputFormat,
-  Output,
-  VideoSample,
-  VideoSampleSource,
-  WebMOutputFormat,
-  getFirstEncodableAudioCodec,
-  getFirstEncodableVideoCodec,
-} from 'mediabunny';
 
 let ffmpegReady: Promise<FFmpeg> | null = null;
 
@@ -25,42 +14,40 @@ const loadFfmpeg = () => {
         wasmURL: await toBlobURL('/ffmpeg/ffmpeg-core.wasm', 'application/wasm'),
       });
       return ffmpeg;
-    })().catch((error) => {
-      ffmpegReady = null;
-      throw error;
-    });
+    })();
   }
   return ffmpegReady;
 };
 
 const audioBufferToWav = (buffer: AudioBuffer) => {
   const channels = buffer.numberOfChannels;
-  const rate = buffer.sampleRate;
-  const samples = buffer.length;
-  const dataSize = samples * channels * 2;
+  const sampleRate = buffer.sampleRate;
+  const length = buffer.length;
+  const bytesPerSample = 2;
+  const dataSize = length * channels * bytesPerSample;
   const out = new ArrayBuffer(44 + dataSize);
   const view = new DataView(out);
-  const write = (offset: number, text: string) => {
-    for (let index = 0; index < text.length; index++) view.setUint8(offset + index, text.charCodeAt(index));
+  const writeText = (offset: number, text: string) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
   };
-  write(0, 'RIFF');
+  writeText(0, 'RIFF');
   view.setUint32(4, 36 + dataSize, true);
-  write(8, 'WAVE');
-  write(12, 'fmt ');
+  writeText(8, 'WAVE');
+  writeText(12, 'fmt ');
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
   view.setUint16(22, channels, true);
-  view.setUint32(24, rate, true);
-  view.setUint32(28, rate * channels * 2, true);
-  view.setUint16(32, channels * 2, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
   view.setUint16(34, 16, true);
-  write(36, 'data');
+  writeText(36, 'data');
   view.setUint32(40, dataSize, true);
-  const channelData = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel));
+  const channelsData = Array.from({ length: channels }, (_, index) => buffer.getChannelData(index));
   let offset = 44;
-  for (let sampleIndex = 0; sampleIndex < samples; sampleIndex++) {
+  for (let i = 0; i < length; i++) {
     for (let channel = 0; channel < channels; channel++) {
-      const sample = Math.max(-1, Math.min(1, channelData[channel][sampleIndex] || 0));
+      const sample = Math.max(-1, Math.min(1, channelsData[channel][i] || 0));
       view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
       offset += 2;
     }
@@ -122,7 +109,7 @@ interface Caption {
 
 type EffectType = 'kenburns' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right' | 'fade';
 
-const EFFECTS: EffectType[] = ['kenburns', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'fade'];
+const EFFECTS: EffectType[] = ['zoom-in', 'zoom-out', 'pan-left', 'pan-right', 'kenburns', 'fade'];
 
 type Stage = 'idle' | 'uploading' | 'ready';
 type VideoFormat = 'long' | 'reel';
@@ -154,12 +141,24 @@ function pairByBaseName(images: ImageItem[], audios: AudioItem[], manualLinks: M
     pairs.push({ image, audio });
   }
 
-  for (const image of images) {
-    if (usedImageIds.has(image.id)) continue;
-    const audio = audios.find(
-      (item) => item.baseName === image.baseName && !usedAudioIds.has(item.id)
-    );
-    if (audio) {
+  const byNumber = (a: { baseName: string }, b: { baseName: string }) =>
+    a.baseName.localeCompare(b.baseName, undefined, { numeric: true });
+  const freeImages = images.filter((image) => !usedImageIds.has(image.id)).sort(byNumber);
+  const freeAudios = audios.filter((audio) => !usedAudioIds.has(audio.id)).sort(byNumber);
+
+  if (freeImages.length > 0 && freeImages.length === freeAudios.length) {
+    freeImages.forEach((image, index) => {
+      const audio = freeAudios[index];
+      usedImageIds.add(image.id);
+      usedAudioIds.add(audio.id);
+      pairs.push({ image, audio });
+    });
+  } else {
+    for (const image of freeImages) {
+      const audio = freeAudios.find(
+        (item) => item.baseName === image.baseName && !usedAudioIds.has(item.id)
+      );
+      if (!audio) continue;
       usedImageIds.add(image.id);
       usedAudioIds.add(audio.id);
       pairs.push({ image, audio });
@@ -570,7 +569,6 @@ export default function App() {
     );
 
     const { pairs, imagesWithoutNarration, narrationsWithoutImage } = pairByBaseName(images, audiosWithDuration, manualLinks);
-    const previousEffects = new Map(syncedImages.map((clip) => [clip.image.id, clip.effect]));
     const keptKeys = new Set<string>();
     const kept: SyncedImage[] = [];
 
@@ -581,7 +579,7 @@ export default function App() {
         ...clip,
         audio: pair.audio,
         duration: pair.audio.duration,
-        effect: previousEffects.get(clip.image.id) ?? clip.effect,
+        effect: EFFECTS[kept.length % EFFECTS.length],
       });
       keptKeys.add(`${pair.image.id}:${pair.audio.id}`);
     }
@@ -594,7 +592,7 @@ export default function App() {
         audio: pair.audio,
         startTime: 0,
         duration: pair.audio.duration,
-        effect: previousEffects.get(pair.image.id) ?? EFFECTS[(kept.length + index) % EFFECTS.length],
+        effect: EFFECTS[(kept.length + index) % EFFECTS.length],
       }));
 
     const matched = [...kept, ...added];
@@ -773,30 +771,31 @@ export default function App() {
       drawHeight = width / imgAspect;
     }
 
-    const wave = Math.sin(Math.min(Math.max(progress, 0), 1) * Math.PI);
+    const move = Math.min(Math.max(progress, 0), 1);
+    const eased = move * move * (3 - 2 * move);
     let scale = 1, offsetX = 0, offsetY = 0, alpha = 1;
     switch (effect) {
-      case 'kenburns':
-        scale = 1 + wave * 0.1;
-        offsetX = -wave * width * 0.03;
-        offsetY = -wave * height * 0.02;
-        break;
       case 'zoom-in':
-        scale = 1 + wave * 0.16;
+        scale = 1 + eased * 0.14;
         break;
       case 'zoom-out':
-        scale = 1 + wave * 0.14;
+        scale = 1.14 - eased * 0.14;
         break;
       case 'pan-left':
-        offsetX = wave * width * 0.06;
-        scale = 1 + wave * 0.05;
+        offsetX = -eased * width * 0.08;
+        scale = 1.08;
         break;
       case 'pan-right':
-        offsetX = -wave * width * 0.06;
-        scale = 1 + wave * 0.05;
+        offsetX = eased * width * 0.08;
+        scale = 1.08;
+        break;
+      case 'kenburns':
+        scale = 1 + eased * 0.1;
+        offsetX = -eased * width * 0.04;
+        offsetY = -eased * height * 0.03;
         break;
       case 'fade':
-        scale = 1 + wave * 0.06;
+        scale = 1.08 - eased * 0.06;
         break;
     }
 
@@ -1072,8 +1071,8 @@ export default function App() {
       }
     }
 
-    const outRate = 48000;
-    const outChannels = Math.min(2, Math.max(...audioBuffers.map((buffer) => buffer.numberOfChannels)));
+    const outRate = audioBuffers[0].sampleRate;
+    const outChannels = Math.max(...audioBuffers.map((buffer) => buffer.numberOfChannels));
     const clipFrames = audioBuffers.map((buffer) => (
       buffer.sampleRate === outRate ? buffer.length : Math.max(1, Math.round(buffer.duration * outRate))
     ));
@@ -1112,161 +1111,65 @@ export default function App() {
     });
     const mediaDuration = clipStart;
 
-    const fps = 30;
-    const frameDuration = 1 / fps;
-    const totalFrames = Math.max(1, Math.round(mediaDuration * fps));
     const showProgress = (ratio: number) => {
       const shown = Math.min(99, Math.max(0, Math.round(ratio * 100)));
       if (exportProgressTextRef.current) exportProgressTextRef.current.textContent = `Rendering… ${shown}%`;
       if (exportProgressBarRef.current) exportProgressBarRef.current.style.width = `${shown}%`;
     };
 
-    const formats = [
-      new WebMOutputFormat(),
-      new Mp4OutputFormat({ fastStart: 'in-memory' }),
-    ];
-    let selected: {
-      format: WebMOutputFormat | Mp4OutputFormat;
-      videoCodec: NonNullable<Awaited<ReturnType<typeof getFirstEncodableVideoCodec>>>;
-      audioCodec: NonNullable<Awaited<ReturnType<typeof getFirstEncodableAudioCodec>>>;
-    } | null = null;
-    for (const format of formats) {
-      const videoCodec = await getFirstEncodableVideoCodec(format.getSupportedVideoCodecs(), { width, height });
-      let audioCodec = await getFirstEncodableAudioCodec(format.getSupportedAudioCodecs(), {
-        numberOfChannels: outChannels,
-        sampleRate: outRate,
-      });
-      if (!audioCodec) {
-        audioCodec = await getFirstEncodableAudioCodec(format.getSupportedAudioCodecs(), {
-          numberOfChannels: Math.min(2, Math.max(1, outChannels)),
-        });
-      }
-      if (videoCodec && audioCodec) {
-        selected = { format, videoCodec, audioCodec };
-        break;
-      }
-    }
-
-    const readFrame = (exportCanvas: HTMLCanvasElement, exportCtx: CanvasRenderingContext2D, timeSec: number) => {
-      const shown = Math.min(timeSec, mediaDuration);
-      renderCurrentFrame(shown, exportCanvas);
-      renderCurrentFrame(shown);
-      const pixels = exportCtx.getImageData(0, 0, width, height);
-      return new Uint8Array(pixels.data);
-    };
-
-    const encodeTimedFrames = async () => {
-      if (!selected) throw new Error('Timed encoder missing');
-      const exportCanvas = document.createElement('canvas');
-      exportCanvas.width = width;
-      exportCanvas.height = height;
-      const exportCtx = exportCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
-      if (!exportCtx) throw new Error('Export canvas nahi bana.');
-      const target = new BufferTarget();
-      const output = new Output({ format: selected.format, target });
-      const videoSource = new VideoSampleSource({
-        codec: selected.videoCodec,
-        bitrate: resolution === '1080p' ? 5_000_000 : 2_500_000,
-      });
-      const audioSource = new AudioBufferSource({ codec: selected.audioCodec, bitrate: 128_000 });
-      output.addVideoTrack(videoSource);
-      output.addAudioTrack(audioSource);
-      await output.start();
-
-      for (let frame = 0; frame < totalFrames; frame++) {
-        const timeSec = frame / fps;
-        const rgba = readFrame(exportCanvas, exportCtx, timeSec);
-        const sample = new VideoSample(rgba, {
-          format: 'RGBA',
-          codedWidth: width,
-          codedHeight: height,
-          timestamp: timeSec,
-          duration: frameDuration,
-        });
-        await videoSource.add(sample);
-        sample.close();
-        showProgress(frame / totalFrames);
-        if (frame % 2 === 0) await new Promise((resolve) => window.setTimeout(resolve, 0));
-      }
-
-      showProgress(0.96);
-      await audioSource.add(combinedBuffer);
-      await output.finalize();
-      if (!target.buffer) throw new Error('Export file empty hai.');
-      return new Blob([target.buffer], { type: selected.format.mimeType });
-    };
-
-    const encodeWithFfmpeg = async () => {
+    const encodeFrames = async () => {
       if (exportProgressTextRef.current) exportProgressTextRef.current.textContent = 'Encoder load ho raha hai…';
       const ffmpeg = await loadFfmpeg();
+      const fps = 30;
+      const totalFrames = Math.max(1, Math.round(mediaDuration * fps));
       const exportCanvas = document.createElement('canvas');
       exportCanvas.width = width;
       exportCanvas.height = height;
-      const names: string[] = [];
-      const onProgress = ({ progress }: { progress: number }) => {
-        showProgress(0.75 + Math.max(0, Math.min(1, progress)) * 0.24);
-      };
-      ffmpeg.on('progress', onProgress);
-      try {
-        await ffmpeg.writeFile('audio.wav', audioBufferToWav(combinedBuffer));
-        for (let frame = 0; frame < totalFrames; frame++) {
-          const shown = Math.min(frame * frameDuration, mediaDuration);
-          renderCurrentFrame(shown, exportCanvas);
-          renderCurrentFrame(shown);
-          const blob = await new Promise<Blob>((resolve, reject) => {
-            exportCanvas.toBlob((file) => file ? resolve(file) : reject(new Error('Frame save nahi hui.')), 'image/jpeg', 0.92);
-          });
-          const name = `f${String(frame).padStart(4, '0')}.jpg`;
-          names.push(name);
-          await ffmpeg.writeFile(name, new Uint8Array(await blob.arrayBuffer()));
-          showProgress((frame + 1) / totalFrames * 0.75);
+      for (let frame = 0; frame < totalFrames; frame++) {
+        renderCurrentFrame(frame / fps, exportCanvas);
+        const blob = await new Promise<Blob>((resolve, reject) => {
+          exportCanvas.toBlob((file) => {
+            if (file) resolve(file);
+            else reject(new Error('Frame save nahi ho saka.'));
+          }, 'image/jpeg', 0.86);
+        });
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        await ffmpeg.writeFile(`f${String(frame).padStart(5, '0')}.jpg`, bytes);
+        if (frame % 8 === 0) {
+          showProgress((frame / totalFrames) * 0.72);
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
         }
-        const code = await ffmpeg.exec([
-          '-framerate', String(fps),
-          '-start_number', '0',
-          '-i', 'f%04d.jpg',
-          '-i', 'audio.wav',
-          '-c:v', 'libx264',
-          '-pix_fmt', 'yuv420p',
-          '-preset', 'ultrafast',
-          '-crf', '20',
-          '-c:a', 'aac',
-          '-b:a', '128k',
-          '-shortest',
-          '-movflags', '+faststart',
-          'out.mp4',
-        ]);
-        if (code !== 0) throw new Error('Video encode nahi ho saki.');
-        const raw = await ffmpeg.readFile('out.mp4');
-        if (!(raw instanceof Uint8Array) || raw.byteLength === 0) throw new Error('Export file empty hai.');
-        const copy = new Uint8Array(raw.byteLength);
-        copy.set(raw);
-        return new Blob([copy], { type: 'video/mp4' });
-      } finally {
-        ffmpeg.off('progress', onProgress);
-        await Promise.all([
-          ...names.map((name) => ffmpeg.deleteFile(name).catch(() => {})),
-          ffmpeg.deleteFile('audio.wav').catch(() => {}),
-          ffmpeg.deleteFile('out.mp4').catch(() => {}),
-        ]);
       }
+      await ffmpeg.writeFile('audio.wav', audioBufferToWav(combinedBuffer));
+      showProgress(0.78);
+      const exitCode = await ffmpeg.exec([
+        '-framerate', String(fps),
+        '-i', 'f%05d.jpg',
+        '-i', 'audio.wav',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-shortest',
+        '-movflags', '+faststart',
+        'out.mp4',
+      ]);
+      if (exitCode !== 0) throw new Error('Video encode nahi ho saki.');
+      const data = await ffmpeg.readFile('out.mp4');
+      const raw = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
+      const copy = new Uint8Array(raw.byteLength);
+      copy.set(raw);
+      for (let frame = 0; frame < totalFrames; frame++) {
+        await ffmpeg.deleteFile(`f${String(frame).padStart(5, '0')}.jpg`).catch(() => {});
+      }
+      await ffmpeg.deleteFile('audio.wav').catch(() => {});
+      await ffmpeg.deleteFile('out.mp4').catch(() => {});
+      return new Blob([copy], { type: 'video/mp4' });
     };
 
-      let videoBlob: Blob;
-      let ext = 'webm';
-      if (selected) {
-        try {
-          videoBlob = await encodeTimedFrames();
-          ext = selected.format.mimeType.includes('mp4') ? 'mp4' : 'webm';
-        } catch {
-          videoBlob = await encodeWithFfmpeg();
-          ext = 'mp4';
-        }
-      } else {
-        videoBlob = await encodeWithFfmpeg();
-        ext = 'mp4';
-      }
-      setVideoExt(ext);
+      const videoBlob = await encodeFrames();
+      setVideoExt('mp4');
       setVideoUrl((current) => {
         if (current) URL.revokeObjectURL(current);
         return URL.createObjectURL(videoBlob);
